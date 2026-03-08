@@ -307,10 +307,14 @@ jobs:
         run: |
           set -euo pipefail
 
+          detect_secrets_exit=0
+          detect_private_key_exit=0
+
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "Running full detect-secrets scan on push."
-            pre-commit run --all-files detect-secrets
-            pre-commit run --all-files detect-private-key
+            pre-commit run --all-files detect-secrets || detect_secrets_exit=$?
+            pre-commit run --all-files detect-private-key || detect_private_key_exit=$?
+            test "$detect_secrets_exit" -eq 0 -a "$detect_private_key_exit" -eq 0
             exit 0
           fi
 
@@ -330,8 +334,9 @@ jobs:
 
           if [ "${#changed_files[@]}" -gt 0 ]; then
             echo "Running secret scans on ${#changed_files[@]} changed file(s)."
-            pre-commit run detect-secrets --files "${changed_files[@]}"
-            pre-commit run detect-private-key --files "${changed_files[@]}"
+            pre-commit run detect-secrets --files "${changed_files[@]}" || detect_secrets_exit=$?
+            pre-commit run detect-private-key --files "${changed_files[@]}" || detect_private_key_exit=$?
+            test "$detect_secrets_exit" -eq 0 -a "$detect_private_key_exit" -eq 0
           else
             echo "No added/copied/modified/renamed files to scan in this pull request."
           fi
