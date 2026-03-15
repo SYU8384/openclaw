@@ -19,9 +19,9 @@ import { extractGeminiResponse } from "../media-understanding/output-extract.js"
 import type { MediaUnderstandingCapability } from "../media-understanding/types.js";
 import { runExec } from "../process/exec.js";
 import {
-  listExtensionHostMediaAutoRuntimeBackendIds,
-  resolveExtensionHostMediaRuntimeDefaultModel,
-} from "./runtime-backend-catalog.js";
+  resolveExtensionHostMediaProviderCandidates,
+  type ExtensionHostMediaActiveModel,
+} from "./media-runtime-policy.js";
 
 export type ActiveMediaModel = {
   provider: string;
@@ -313,7 +313,7 @@ async function resolveKeyEntry(params: {
   agentDir?: string;
   providerRegistry: ProviderRegistry;
   capability: MediaUnderstandingCapability;
-  activeModel?: ActiveMediaModel;
+  activeModel?: ExtensionHostMediaActiveModel;
 }): Promise<MediaUnderstandingModelConfig | null> {
   const { cfg, agentDir, providerRegistry, capability } = params;
   const checkProvider = async (
@@ -341,53 +341,11 @@ async function resolveKeyEntry(params: {
     }
   };
 
-  if (capability === "image") {
-    const activeProvider = params.activeModel?.provider?.trim();
-    if (activeProvider) {
-      const activeEntry = await checkProvider(activeProvider, params.activeModel?.model);
-      if (activeEntry) {
-        return activeEntry;
-      }
-    }
-    for (const providerId of listExtensionHostMediaAutoRuntimeBackendIds("image")) {
-      const model = resolveExtensionHostMediaRuntimeDefaultModel({
-        capability: "image",
-        backendId: providerId,
-      });
-      const entry = await checkProvider(providerId, model);
-      if (entry) {
-        return entry;
-      }
-    }
-    return null;
-  }
-
-  if (capability === "video") {
-    const activeProvider = params.activeModel?.provider?.trim();
-    if (activeProvider) {
-      const activeEntry = await checkProvider(activeProvider, params.activeModel?.model);
-      if (activeEntry) {
-        return activeEntry;
-      }
-    }
-    for (const providerId of listExtensionHostMediaAutoRuntimeBackendIds("video")) {
-      const entry = await checkProvider(providerId, undefined);
-      if (entry) {
-        return entry;
-      }
-    }
-    return null;
-  }
-
-  const activeProvider = params.activeModel?.provider?.trim();
-  if (activeProvider) {
-    const activeEntry = await checkProvider(activeProvider, params.activeModel?.model);
-    if (activeEntry) {
-      return activeEntry;
-    }
-  }
-  for (const providerId of listExtensionHostMediaAutoRuntimeBackendIds("audio")) {
-    const entry = await checkProvider(providerId, undefined);
+  for (const candidate of resolveExtensionHostMediaProviderCandidates({
+    capability,
+    activeModel: params.activeModel,
+  })) {
+    const entry = await checkProvider(candidate.provider, candidate.model);
     if (entry) {
       return entry;
     }
@@ -472,12 +430,7 @@ export async function resolveAutoImageModel(params: {
     if (!provider) {
       return null;
     }
-    const model =
-      entry.model ??
-      resolveExtensionHostMediaRuntimeDefaultModel({
-        capability: "image",
-        backendId: provider,
-      });
+    const model = entry.model;
     if (!model) {
       return null;
     }
