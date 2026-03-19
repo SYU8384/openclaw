@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import { clearPluginDiscoveryCache } from "../plugins/discovery.js";
+import { clearPluginManifestRegistryCache } from "../plugins/manifest-registry.js";
 import {
   clearInternalHooks,
   createInternalHookEvent,
@@ -24,6 +26,8 @@ describe("bundle plugin hooks", () => {
 
   beforeEach(async () => {
     clearInternalHooks();
+    clearPluginDiscoveryCache();
+    clearPluginManifestRegistryCache();
     workspaceDir = path.join(fixtureRoot, `case-${caseId++}`);
     await fsp.mkdir(workspaceDir, { recursive: true });
     previousBundledHooksDir = process.env.OPENCLAW_BUNDLED_HOOKS_DIR;
@@ -32,6 +36,8 @@ describe("bundle plugin hooks", () => {
 
   afterEach(() => {
     clearInternalHooks();
+    clearPluginDiscoveryCache();
+    clearPluginManifestRegistryCache();
     if (previousBundledHooksDir === undefined) {
       delete process.env.OPENCLAW_BUNDLED_HOOKS_DIR;
     } else {
