@@ -466,10 +466,10 @@ export async function installSkill(params: SkillInstallRequest): Promise<SkillIn
         {
           skillName: params.skillName,
           sourceDir: path.resolve(entry.skill.baseDir),
-          source: entry.skill.source,
+          source: skillSource,
           builtinFindings: scanResult.findings,
         },
-        { source: entry.skill.source },
+        { source: skillSource },
       );
       if (hookResult?.block) {
         return {

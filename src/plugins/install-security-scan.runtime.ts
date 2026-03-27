@@ -7,6 +7,20 @@ type InstallScanLogger = {
   warn?: (message: string) => void;
 };
 
+type InstallScanFinding = {
+  ruleId: string;
+  severity: "info" | "warn" | "critical";
+  file: string;
+  line: number;
+  message: string;
+};
+
+export type InstallSecurityScanResult = {
+  blocked?: {
+    reason: string;
+  };
+};
+
 function buildCriticalDetails(params: {
   findings: Array<{ file: string; line: number; message: string; severity: string }>;
 }) {
@@ -16,18 +30,54 @@ function buildCriticalDetails(params: {
     .join("; ");
 }
 
+async function runBeforeSkillInstallHook(params: {
+  logger: InstallScanLogger;
+  installLabel: string;
+  skillName: string;
+  sourceDir: string;
+  builtinFindings: InstallScanFinding[];
+}): Promise<InstallSecurityScanResult | undefined> {
+  const hookRunner = getGlobalHookRunner();
+  if (!hookRunner?.hasHooks("before_skill_install")) {
+    return undefined;
+  }
+
+  try {
+    const hookResult = await hookRunner.runBeforeSkillInstall(
+      {
+        skillName: params.skillName,
+        sourceDir: params.sourceDir,
+        builtinFindings: params.builtinFindings,
+      },
+      {},
+    );
+    if (hookResult?.block) {
+      const reason = hookResult.blockReason || "Installation blocked by plugin hook";
+      params.logger.warn?.(`WARNING: ${params.installLabel} blocked by plugin hook: ${reason}`);
+      return { blocked: { reason } };
+    }
+    if (hookResult?.findings) {
+      for (const finding of hookResult.findings) {
+        if (finding.severity === "critical" || finding.severity === "warn") {
+          params.logger.warn?.(
+            `Plugin scanner: ${finding.message} (${finding.file}:${finding.line})`,
+          );
+        }
+      }
+    }
+  } catch {
+    // Hook errors are non-fatal.
+  }
+
+  return undefined;
+}
+
 export async function scanBundleInstallSourceRuntime(params: {
   logger: InstallScanLogger;
   pluginId: string;
   sourceDir: string;
-}) {
-  let builtinFindings: Array<{
-    ruleId: string;
-    severity: "info" | "warn" | "critical";
-    file: string;
-    line: number;
-    message: string;
-  }> = [];
+}): Promise<InstallSecurityScanResult | undefined> {
+  let builtinFindings: InstallScanFinding[] = [];
   try {
     const scanSummary = await scanDirectoryWithSummary(params.sourceDir);
     builtinFindings = scanSummary.findings;
@@ -35,9 +85,7 @@ export async function scanBundleInstallSourceRuntime(params: {
       params.logger.warn?.(
         `WARNING: Bundle "${params.pluginId}" contains dangerous code patterns: ${buildCriticalDetails({ findings: scanSummary.findings })}`,
       );
-      return;
-    }
-    if (scanSummary.warn > 0) {
+    } else if (scanSummary.warn > 0) {
       params.logger.warn?.(
         `Bundle "${params.pluginId}" has ${scanSummary.warn} suspicious code pattern(s). Run "openclaw security audit --deep" for details.`,
       );
@@ -48,36 +96,13 @@ export async function scanBundleInstallSourceRuntime(params: {
     );
   }
 
-  // Run before_skill_install hook so external scanners can audit bundles.
-  try {
-    const hookRunner = getGlobalHookRunner();
-    if (hookRunner?.hasHooks("before_skill_install")) {
-      const hookResult = await hookRunner.runBeforeSkillInstall(
-        {
-          skillName: params.pluginId,
-          sourceDir: params.sourceDir,
-          builtinFindings,
-        },
-        {},
-      );
-      if (hookResult?.block) {
-        params.logger.warn?.(
-          `WARNING: Bundle "${params.pluginId}" installation blocked by plugin hook: ${hookResult.blockReason || "no reason given"}`,
-        );
-      }
-      if (hookResult?.findings) {
-        for (const finding of hookResult.findings) {
-          if (finding.severity === "critical" || finding.severity === "warn") {
-            params.logger.warn?.(
-              `Plugin scanner: ${finding.message} (${finding.file}:${finding.line})`,
-            );
-          }
-        }
-      }
-    }
-  } catch {
-    // Hook errors are non-fatal.
-  }
+  return await runBeforeSkillInstallHook({
+    logger: params.logger,
+    installLabel: `Bundle "${params.pluginId}" installation`,
+    skillName: params.pluginId,
+    sourceDir: params.sourceDir,
+    builtinFindings,
+  });
 }
 
 export async function scanPackageInstallSourceRuntime(params: {
@@ -85,7 +110,7 @@ export async function scanPackageInstallSourceRuntime(params: {
   logger: InstallScanLogger;
   packageDir: string;
   pluginId: string;
-}) {
+}): Promise<InstallSecurityScanResult | undefined> {
   const forcedScanEntries: string[] = [];
   for (const entry of params.extensions) {
     const resolvedEntry = path.resolve(params.packageDir, entry);
@@ -103,13 +128,7 @@ export async function scanPackageInstallSourceRuntime(params: {
     forcedScanEntries.push(resolvedEntry);
   }
 
-  let builtinFindings: Array<{
-    ruleId: string;
-    severity: "info" | "warn" | "critical";
-    file: string;
-    line: number;
-    message: string;
-  }> = [];
+  let builtinFindings: InstallScanFinding[] = [];
   try {
     const scanSummary = await scanDirectoryWithSummary(params.packageDir, {
       includeFiles: forcedScanEntries,
@@ -119,9 +138,7 @@ export async function scanPackageInstallSourceRuntime(params: {
       params.logger.warn?.(
         `WARNING: Plugin "${params.pluginId}" contains dangerous code patterns: ${buildCriticalDetails({ findings: scanSummary.findings })}`,
       );
-      return;
-    }
-    if (scanSummary.warn > 0) {
+    } else if (scanSummary.warn > 0) {
       params.logger.warn?.(
         `Plugin "${params.pluginId}" has ${scanSummary.warn} suspicious code pattern(s). Run "openclaw security audit --deep" for details.`,
       );
@@ -132,34 +149,11 @@ export async function scanPackageInstallSourceRuntime(params: {
     );
   }
 
-  // Run before_skill_install hook so external scanners can audit packages.
-  try {
-    const hookRunner = getGlobalHookRunner();
-    if (hookRunner?.hasHooks("before_skill_install")) {
-      const hookResult = await hookRunner.runBeforeSkillInstall(
-        {
-          skillName: params.pluginId,
-          sourceDir: params.packageDir,
-          builtinFindings,
-        },
-        {},
-      );
-      if (hookResult?.block) {
-        params.logger.warn?.(
-          `WARNING: Plugin "${params.pluginId}" installation blocked by plugin hook: ${hookResult.blockReason || "no reason given"}`,
-        );
-      }
-      if (hookResult?.findings) {
-        for (const finding of hookResult.findings) {
-          if (finding.severity === "critical" || finding.severity === "warn") {
-            params.logger.warn?.(
-              `Plugin scanner: ${finding.message} (${finding.file}:${finding.line})`,
-            );
-          }
-        }
-      }
-    }
-  } catch {
-    // Hook errors are non-fatal.
-  }
+  return await runBeforeSkillInstallHook({
+    logger: params.logger,
+    installLabel: `Plugin "${params.pluginId}" installation`,
+    skillName: params.pluginId,
+    sourceDir: params.packageDir,
+    builtinFindings,
+  });
 }
