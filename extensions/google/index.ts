@@ -159,11 +159,13 @@ export default definePluginEntry({
       resolveDynamicModel: (ctx) =>
         resolveGoogleGeminiForwardCompatModel({
           providerId: ctx.provider,
+          templateProviderId: "google-gemini-cli",
           ctx,
         }),
       ...GOOGLE_GEMINI_PROVIDER_HOOKS,
       isModernModelRef: ({ modelId }) => isModernGoogleModel(modelId),
     });
+    registerGoogleGeminiCliProvider(api);
     api.registerImageGenerationProvider(createLazyGoogleImageGenerationProvider());
     api.registerMediaUnderstandingProvider(createLazyGoogleMediaUnderstandingProvider());
     api.registerVideoGenerationProvider(buildGoogleVideoGenerationProvider());
