@@ -6,7 +6,7 @@
  */
 
 import type { ResolvedQQBotAccount } from "./types.js";
-import { debugLog, debugError } from "./utils/debug-log.js";
+import { debugLog, debugError, formatUnknownError } from "./utils/debug-log.js";
 
 // Re-export known-user types and functions from the canonical module.
 export type { KnownUser } from "./known-users.js";
@@ -54,7 +54,6 @@ import {
   getAccessToken,
   sendProactiveC2CMessage,
   sendProactiveGroupMessage,
-  sendChannelMessage,
   sendC2CImageMessage,
   sendGroupImageMessage,
 } from "./api.js";
@@ -75,7 +74,7 @@ export function listKnownUsers(
 ): ReturnType<typeof listKnownUsersImpl> {
   const type = options?.type;
   return listKnownUsersImpl({
-    type: type === "channel" ? undefined : (type as "c2c" | "group" | undefined),
+    type: type === "channel" ? undefined : type,
     accountId: options?.accountId,
     limit: options?.limit,
     sortBy: options?.sortByLastInteraction !== false ? "lastSeenAt" : undefined,
@@ -134,7 +133,7 @@ export async function sendProactive(
         }
         debugLog(`[qqbot:proactive] Sent image to ${type}:${to}`);
       } catch (err) {
-        debugError(`[qqbot:proactive] Failed to send image: ${err}`);
+        debugError(`[qqbot:proactive] Failed to send image: ${formatUnknownError(err)}`);
       }
     }
 
@@ -148,11 +147,6 @@ export async function sendProactive(
       return {
         success: false,
         error: "Channel proactive messages are not supported. Please use group or c2c.",
-      };
-    } else {
-      return {
-        success: false,
-        error: `Unknown message type: ${type}`,
       };
     }
 
@@ -237,7 +231,7 @@ export async function broadcastMessage(
       {
         to: targetId,
         text,
-        type: user.type as "c2c" | "group",
+        type: user.type,
         accountId: user.accountId,
       },
       cfg,
