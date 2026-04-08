@@ -1,7 +1,3 @@
-import { createProjectShardVitestConfig } from "./vitest.project-shard-config.ts";
-import { fullSuiteVitestShards } from "./vitest.test-shards.mjs";
+import config from "./vitest.full-core-agentic.config.ts";
 
-export default createProjectShardVitestConfig(
-  fullSuiteVitestShards.find((shard) => shard.config === "vitest.full-agentic.config.ts")
-    ?.projects ?? [],
-);
+export default config;

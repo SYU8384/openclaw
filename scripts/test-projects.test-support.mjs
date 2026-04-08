@@ -83,6 +83,7 @@ const UI_VITEST_CONFIG = "vitest.ui.config.ts";
 const UTILS_VITEST_CONFIG = "vitest.utils.config.ts";
 const WIZARD_VITEST_CONFIG = "vitest.wizard.config.ts";
 const INCLUDE_FILE_ENV_KEY = "OPENCLAW_VITEST_INCLUDE_FILE";
+const FULL_SUITE_GROUP_ENV_KEY = "OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP";
 const CHANGED_ARGS_PATTERN = /^--changed(?:=(.+))?$/u;
 const VITEST_CONFIG_BY_KIND = {
   acp: ACP_VITEST_CONFIG,
@@ -620,7 +621,16 @@ export function buildFullSuiteVitestRunPlans(args, cwd = process.cwd()) {
     ];
   }
   const expandToProjectConfigs = process.env.OPENCLAW_TEST_PROJECTS_LEAF_SHARDS === "1";
-  return fullSuiteVitestShards.flatMap((shard) => {
+  const requestedGroup = process.env[FULL_SUITE_GROUP_ENV_KEY];
+  if (requestedGroup && requestedGroup !== "core" && requestedGroup !== "sdk") {
+    throw new Error(
+      `${FULL_SUITE_GROUP_ENV_KEY} must be "core" or "sdk", got ${JSON.stringify(requestedGroup)}`,
+    );
+  }
+  const shards = requestedGroup
+    ? fullSuiteVitestShards.filter((shard) => shard.group === requestedGroup)
+    : fullSuiteVitestShards;
+  return shards.flatMap((shard) => {
     const configs = expandToProjectConfigs ? shard.projects : [shard.config];
     return configs.map((config) => ({
       config,

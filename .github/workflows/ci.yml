@@ -40,6 +40,8 @@ jobs:
       checks_fast_extensions_matrix: ${{ steps.manifest.outputs.checks_fast_extensions_matrix }}
       run_checks: ${{ steps.manifest.outputs.run_checks }}
       checks_matrix: ${{ steps.manifest.outputs.checks_matrix }}
+      run_checks_sdk: ${{ steps.manifest.outputs.run_checks_sdk }}
+      checks_sdk_matrix: ${{ steps.manifest.outputs.checks_sdk_matrix }}
       run_extension_fast: ${{ steps.manifest.outputs.run_extension_fast }}
       extension_fast_matrix: ${{ steps.manifest.outputs.extension_fast_matrix }}
       run_check: ${{ steps.manifest.outputs.run_check }}
@@ -216,7 +218,7 @@ jobs:
             checks_matrix: createMatrix(
               runNode
                 ? [
-                    { check_name: "checks-node-test", runtime: "node", task: "test" },
+                    { check_name: "checks-node-test", runtime: "node", task: "test-core" },
                     { check_name: "checks-node-channels", runtime: "node", task: "channels" },
                     ...(isPush
                       ? [
@@ -230,6 +232,12 @@ jobs:
                         ]
                       : []),
                   ]
+                : [],
+            ),
+            run_checks_sdk: runNode,
+            checks_sdk_matrix: createMatrix(
+              runNode
+                ? [{ check_name: "checks-node-sdk", runtime: "node", task: "test-sdk" }]
                 : [],
             ),
             run_extension_fast: hasChangedExtensions,
@@ -515,8 +523,8 @@ jobs:
 
   checks:
     name: ${{ matrix.check_name }}
-    needs: [preflight, build-artifacts]
-    if: always() && needs.preflight.outputs.run_checks == 'true' && needs.build-artifacts.result == 'success'
+    needs: [preflight]
+    if: always() && needs.preflight.outputs.run_checks == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 60
     strategy:
@@ -544,27 +552,21 @@ jobs:
           use-sticky-disk: "false"
 
       - name: Configure Node test resources
-        if: (github.event_name != 'pull_request' || matrix.task != 'compat-node22') && matrix.runtime == 'node' && (matrix.task == 'test' || matrix.task == 'channels' || matrix.task == 'compat-node22')
+        if: (github.event_name != 'pull_request' || matrix.task != 'compat-node22') && matrix.runtime == 'node' && (matrix.task == 'test-core' || matrix.task == 'channels' || matrix.task == 'compat-node22')
         env:
           TASK: ${{ matrix.task }}
         run: |
           echo "OPENCLAW_VITEST_MAX_WORKERS=2" >> "$GITHUB_ENV"
-          if [ "$TASK" = "test" ]; then
+          if [ "$TASK" = "test-core" ]; then
             echo "OPENCLAW_TEST_PROJECTS_PARALLEL=6" >> "$GITHUB_ENV"
+            echo "OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP=core" >> "$GITHUB_ENV"
           fi
           if [ "$TASK" = "channels" ]; then
             echo "OPENCLAW_VITEST_MAX_WORKERS=1" >> "$GITHUB_ENV"
           fi
 
-      - name: Download dist artifact
-        if: matrix.task == 'test'
-        uses: actions/download-artifact@v8
-        with:
-          name: dist-build
-          path: dist/
-
       - name: Download A2UI bundle artifact
-        if: matrix.task == 'test' || matrix.task == 'channels'
+        if: matrix.task == 'test-core' || matrix.task == 'channels'
         uses: actions/download-artifact@v8
         with:
           name: canvas-a2ui-bundle
@@ -579,7 +581,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$TASK" in
-            test)
+            test-core)
               pnpm test
               ;;
             channels)
@@ -594,6 +596,66 @@ jobs:
               ;;
             *)
               echo "Unsupported checks task: $TASK" >&2
+              exit 1
+              ;;
+          esac
+
+  checks-sdk:
+    name: ${{ matrix.check_name }}
+    needs: [preflight, build-artifacts]
+    if: always() && needs.preflight.outputs.run_checks_sdk == 'true' && needs.build-artifacts.result == 'success'
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.preflight.outputs.checks_sdk_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: false
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "${{ matrix.node_version || '24.x' }}"
+          cache-key-suffix: "${{ matrix.cache_key_suffix || 'node24' }}"
+          install-bun: "false"
+          use-sticky-disk: "false"
+
+      - name: Configure Node SDK test resources
+        if: matrix.runtime == 'node' && matrix.task == 'test-sdk'
+        run: |
+          echo "OPENCLAW_VITEST_MAX_WORKERS=2" >> "$GITHUB_ENV"
+          echo "OPENCLAW_TEST_PROJECTS_PARALLEL=6" >> "$GITHUB_ENV"
+          echo "OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP=sdk" >> "$GITHUB_ENV"
+
+      - name: Download dist artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: dist-build
+          path: dist/
+
+      - name: Download A2UI bundle artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: canvas-a2ui-bundle
+          path: src/canvas-host/a2ui/
+
+      - name: Run ${{ matrix.task }} (${{ matrix.runtime }})
+        env:
+          TASK: ${{ matrix.task }}
+          NODE_OPTIONS: --max-old-space-size=6144
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$TASK" in
+            test-sdk)
+              pnpm test
+              ;;
+            *)
+              echo "Unsupported checks sdk task: $TASK" >&2
               exit 1
               ;;
           esac

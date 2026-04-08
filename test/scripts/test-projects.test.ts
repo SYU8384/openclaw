@@ -196,6 +196,7 @@ describe("scripts/test-projects changed-target routing", () => {
 describe("scripts/test-projects full-suite sharding", () => {
   it("splits untargeted runs into fixed shard configs", () => {
     delete process.env.OPENCLAW_TEST_PROJECTS_LEAF_SHARDS;
+    delete process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP;
 
     expect(buildFullSuiteVitestRunPlans([], process.cwd()).map((plan) => plan.config)).toEqual([
       "vitest.full-core-unit-fast.config.ts",
@@ -207,8 +208,50 @@ describe("scripts/test-projects full-suite sharding", () => {
       "vitest.full-core-contracts.config.ts",
       "vitest.full-core-bundled.config.ts",
       "vitest.full-core-runtime.config.ts",
-      "vitest.full-agentic.config.ts",
+      "vitest.full-core-agentic.config.ts",
+      "vitest.full-sdk-surfaces.config.ts",
       "vitest.full-auto-reply.config.ts",
+      "vitest.full-extensions.config.ts",
+    ]);
+  });
+
+  it("can scope untargeted full-suite runs to the core-only lane", () => {
+    const previous = process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP;
+    process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP = "core";
+    const plans = buildFullSuiteVitestRunPlans([], process.cwd());
+    if (previous === undefined) {
+      delete process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP;
+    } else {
+      process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP = previous;
+    }
+
+    expect(plans.map((plan) => plan.config)).toEqual([
+      "vitest.full-core-unit-fast.config.ts",
+      "vitest.full-core-unit-src.config.ts",
+      "vitest.full-core-unit-security.config.ts",
+      "vitest.full-core-unit-ui.config.ts",
+      "vitest.full-core-unit-support.config.ts",
+      "vitest.full-core-support-boundary.config.ts",
+      "vitest.full-core-runtime.config.ts",
+      "vitest.full-core-agentic.config.ts",
+      "vitest.full-auto-reply.config.ts",
+    ]);
+  });
+
+  it("can scope untargeted full-suite runs to the sdk-only lane", () => {
+    const previous = process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP;
+    process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP = "sdk";
+    const plans = buildFullSuiteVitestRunPlans([], process.cwd());
+    if (previous === undefined) {
+      delete process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP;
+    } else {
+      process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP = previous;
+    }
+
+    expect(plans.map((plan) => plan.config)).toEqual([
+      "vitest.full-core-contracts.config.ts",
+      "vitest.full-core-bundled.config.ts",
+      "vitest.full-sdk-surfaces.config.ts",
       "vitest.full-extensions.config.ts",
     ]);
   });
@@ -216,6 +259,7 @@ describe("scripts/test-projects full-suite sharding", () => {
   it("can expand full-suite shards to project configs for perf experiments", () => {
     const previous = process.env.OPENCLAW_TEST_PROJECTS_LEAF_SHARDS;
     process.env.OPENCLAW_TEST_PROJECTS_LEAF_SHARDS = "1";
+    delete process.env.OPENCLAW_TEST_PROJECTS_FULL_SUITE_GROUP;
     const plans = buildFullSuiteVitestRunPlans([], process.cwd());
     if (previous === undefined) {
       delete process.env.OPENCLAW_TEST_PROJECTS_LEAF_SHARDS;
