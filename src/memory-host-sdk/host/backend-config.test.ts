@@ -154,6 +154,38 @@ describe("resolveMemoryBackendConfig", () => {
     expect(custom?.path).toBe(path.resolve(workspaceRoot, "notes"));
   });
 
+  it("normalizes direct file paths into parent-root collections", async () => {
+    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "qmd-backend-config-file-"));
+    const workspaceDir = path.join(tmpRoot, "workspace");
+    const sharedDir = path.join(tmpRoot, "shared");
+    const sharedFile = path.join(sharedDir, "shared-memory.md");
+    try {
+      await fs.mkdir(workspaceDir, { recursive: true });
+      await fs.mkdir(sharedDir, { recursive: true });
+      await fs.writeFile(sharedFile, "# Shared memory\n", "utf8");
+      const cfg = {
+        agents: {
+          defaults: { workspace: workspaceDir },
+          list: [{ id: "main", default: true, workspace: workspaceDir }],
+        },
+        memory: {
+          backend: "qmd",
+          qmd: {
+            includeDefaultMemory: false,
+            paths: [{ path: sharedFile, name: "shared-memory" }],
+          },
+        },
+      } as OpenClawConfig;
+      const resolved = resolveMemoryBackendConfig({ cfg, agentId: "main" });
+      const collection = resolved.qmd?.collections.find((entry) => entry.name === "shared-memory");
+      expect(collection).toBeDefined();
+      expect(collection?.path).toBe(sharedDir);
+      expect(collection?.pattern).toBe("shared-memory.md");
+    } finally {
+      await fs.rm(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
   it("scopes qmd collection names per agent", () => {
     const cfg = qmdMultiAgentConfig([{ path: "notes", name: "workspace", pattern: "**/*.md" }]);
     const mainNames = resolveCollectionNamesForAgent(cfg, "main");
