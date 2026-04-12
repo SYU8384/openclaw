@@ -288,6 +288,9 @@ function resolveCustomPaths(
     try {
       const stat = fs.statSync(resolved);
       if (stat.isFile()) {
+        // When the configured path points directly to a file, normalize into a
+        // parent-directory collection with an exact-filename pattern, regardless
+        // of any user-supplied glob (a glob does not apply to a single file).
         collectionPath = path.dirname(resolved);
         pattern = path.basename(resolved);
       }
