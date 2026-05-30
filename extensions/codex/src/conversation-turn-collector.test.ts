@@ -27,7 +27,7 @@ describe("codex conversation turn collector", () => {
       params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
     });
 
-    await expect(completion).resolves.toEqual({ replyText: "hello world" });
+    await expect(completion).resolves.toEqual({ replyText: "hello world", planText: "" });
   });
 
   it("buffers pre-start notifications and replays only the selected turn", async () => {
@@ -64,6 +64,7 @@ describe("codex conversation turn collector", () => {
 
     await expect(collector.wait({ timeoutMs: 1_000 })).resolves.toEqual({
       replyText: "fresh answer",
+      planText: "",
     });
   });
 
@@ -85,7 +86,7 @@ describe("codex conversation turn collector", () => {
       params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
     });
 
-    await expect(completion).resolves.toEqual({ replyText: "final answer" });
+    await expect(completion).resolves.toEqual({ replyText: "final answer", planText: "" });
   });
 
   it("ignores notifications for other threads or turns", async () => {
@@ -113,7 +114,7 @@ describe("codex conversation turn collector", () => {
       },
     });
 
-    await expect(completion).resolves.toEqual({ replyText: "right" });
+    await expect(completion).resolves.toEqual({ replyText: "right", planText: "" });
   });
 
   it("ignores unscoped deltas once the active turn is known", async () => {
@@ -134,7 +135,7 @@ describe("codex conversation turn collector", () => {
       params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
     });
 
-    await expect(completion).resolves.toEqual({ replyText: "right" });
+    await expect(completion).resolves.toEqual({ replyText: "right", planText: "" });
   });
 
   it("does not complete from unscoped turn completion once the active turn is known", async () => {
@@ -164,7 +165,76 @@ describe("codex conversation turn collector", () => {
       },
     });
 
-    await expect(completion).resolves.toEqual({ replyText: "right" });
+    await expect(completion).resolves.toEqual({ replyText: "right", planText: "" });
+  });
+
+  it("collects streamed and completed plan text", async () => {
+    const collector = createCodexConversationTurnCollector("thread-1");
+    collector.setTurnId("turn-1");
+    const completion = collector.wait({ timeoutMs: 1_000 });
+
+    collector.handleNotification({
+      method: "item/plan/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "plan-1",
+        delta: "<proposed_plan>Step 1",
+      },
+    });
+    collector.handleNotification({
+      method: "item/plan/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "plan-1",
+        delta: "</proposed_plan>",
+      },
+    });
+    collector.handleNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+    });
+
+    await expect(completion).resolves.toEqual({
+      replyText: "",
+      planText: "<proposed_plan>Step 1</proposed_plan>",
+    });
+  });
+
+  it("emits live progress for commentary, plan, and item state changes", async () => {
+    const onProgress = vi.fn();
+    const collector = createCodexConversationTurnCollector("thread-1", { onProgress });
+    collector.setTurnId("turn-1");
+
+    collector.handleNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "msg-1", type: "agentMessage", phase: "commentary" },
+      },
+    });
+    collector.handleNotification({
+      method: "item/agentMessage/delta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "msg-1", delta: "thinking" },
+    });
+    collector.handleNotification({
+      method: "item/plan/delta",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "plan-1", delta: "do it" },
+    });
+    collector.handleNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "tool-1", type: "toolCall", tool: "shell" },
+      },
+    });
+
+    expect(onProgress).toHaveBeenCalledWith("Codex: thinking");
+    expect(onProgress).toHaveBeenCalledWith("Codex plan:\ndo it");
+    expect(onProgress).toHaveBeenCalledWith("Codex started shell (toolCall).");
   });
 
   it("rejects failed turns with the app-server error message", async () => {

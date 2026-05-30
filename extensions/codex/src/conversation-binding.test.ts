@@ -1,4 +1,3 @@
-// Codex tests cover conversation binding plugin behavior.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -74,6 +73,10 @@ import {
   handleCodexConversationInboundClaim,
   startCodexConversationThread,
 } from "./conversation-binding.js";
+import {
+  answerCodexUserInput,
+  resetCodexConversationChatControlsForTests,
+} from "./conversation-chat-controls.js";
 
 let tempDir: string;
 
@@ -83,6 +86,18 @@ function mockCallArg(mock: ReturnType<typeof vi.fn>, callIndex = 0, argIndex = 0
     throw new Error(`Expected mock call ${callIndex}`);
   }
   return call[argIndex];
+}
+
+function readReplyButtons(reply: {
+  interactive?: { blocks?: unknown[] };
+}): Array<{ label: string; value: string }> {
+  const block = reply.interactive?.blocks?.find(
+    (entry): entry is { buttons: Array<{ label: string; value: string }> } =>
+      Boolean(entry) &&
+      typeof entry === "object" &&
+      Array.isArray((entry as { buttons?: unknown }).buttons),
+  );
+  return block?.buttons ?? [];
 }
 
 describe("codex conversation binding", () => {
@@ -106,6 +121,7 @@ describe("codex conversation binding", () => {
     codexRequirementsTomlMock.mockReset();
     resolveSandboxContextMock.mockReset();
     resolveSandboxContextMock.mockResolvedValue(null);
+    resetCodexConversationChatControlsForTests();
     await fs.rm(tempDir, { recursive: true, force: true });
   });
 
@@ -640,6 +656,8 @@ describe("codex conversation binding", () => {
         approvalPolicy: "on-request",
         sandbox: "workspace-write",
         serviceTier: "fast",
+        collaborationMode: "plan",
+        reasoningEffort: "minimal",
       }),
     );
     const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -736,6 +754,15 @@ describe("codex conversation binding", () => {
     expect(requests[2]?.params.threadId).toBe("thread-new");
     expect(requests[2]?.params.approvalPolicy).toBe("on-request");
     expect(requests[2]?.params.serviceTier).toBe("priority");
+    expect(requests[2]?.params.effort).toBe("low");
+    expect(requests[2]?.params.collaborationMode).toEqual({
+      mode: "plan",
+      settings: {
+        model: "gpt-5.4-mini",
+        reasoning_effort: "low",
+        developer_instructions: null,
+      },
+    });
     const savedBinding = JSON.parse(
       await fs.readFile(`${sessionFile}.codex-app-server.json`, "utf8"),
     );
@@ -744,6 +771,8 @@ describe("codex conversation binding", () => {
     expect(savedBinding.approvalPolicy).toBe("on-request");
     expect(savedBinding.sandbox).toBe("workspace-write");
     expect(savedBinding.serviceTier).toBe("priority");
+    expect(savedBinding.collaborationMode).toBe("plan");
+    expect(savedBinding.reasoningEffort).toBe("minimal");
     expect(savedBinding).not.toHaveProperty("modelProvider");
   });
 
@@ -1037,6 +1066,439 @@ describe("codex conversation binding", () => {
     expect(turnStartParams).toEqual([]);
   });
 
+  it("uses configured Codex think defaults for execute and plan turns", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await fs.writeFile(
+      `${sessionFile}.codex-app-server.json`,
+      JSON.stringify({
+        schemaVersion: 1,
+        threadId: "thread-1",
+        cwd: tempDir,
+        model: "gpt-5.4-mini",
+      }),
+    );
+    const turnStartParams: Record<string, unknown>[] = [];
+    const notificationHandlers: Array<(notification: Record<string, unknown>) => void> = [];
+    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
+      request: vi.fn(async (method: string, requestParams: Record<string, unknown>) => {
+        if (method !== "turn/start") {
+          throw new Error(`unexpected method: ${method}`);
+        }
+        const turnIndex = turnStartParams.length + 1;
+        turnStartParams.push(requestParams);
+        setImmediate(() => {
+          for (const handler of notificationHandlers) {
+            handler({
+              method: "turn/completed",
+              params: {
+                threadId: "thread-1",
+                turn: {
+                  id: `turn-${turnIndex}`,
+                  status: "completed",
+                  items: [{ type: "agentMessage", id: `item-${turnIndex}`, text: "done" }],
+                },
+              },
+            });
+          }
+        });
+        return { turn: { id: `turn-${turnIndex}` } };
+      }),
+      addNotificationHandler: vi.fn((handler) => {
+        notificationHandlers.push(handler);
+        return () => undefined;
+      }),
+      addRequestHandler: vi.fn(() => () => undefined),
+    });
+    const pluginConfig = {
+      appServer: {
+        conversationReasoningDefaults: {
+          execute: "medium",
+          plan: "xhigh",
+        },
+      },
+    };
+    const bindingContext = {
+      channelId: "telegram",
+      pluginBinding: {
+        bindingId: "binding-1",
+        pluginId: "codex",
+        pluginRoot: tempDir,
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "5185575566",
+        boundAt: Date.now(),
+        data: {
+          kind: "codex-app-server-session",
+          version: 1,
+          sessionFile,
+          workspaceDir: tempDir,
+        },
+      },
+    };
+
+    await expect(
+      handleCodexConversationInboundClaim(
+        {
+          content: "execute this",
+          bodyForAgent: "execute this",
+          channel: "telegram",
+          isGroup: false,
+          commandAuthorized: true,
+        },
+        bindingContext,
+        { pluginConfig, timeoutMs: 50 },
+      ),
+    ).resolves.toEqual({ handled: true, reply: { text: "done" } });
+    await fs.writeFile(
+      `${sessionFile}.codex-app-server.json`,
+      JSON.stringify({
+        schemaVersion: 1,
+        threadId: "thread-1",
+        cwd: tempDir,
+        model: "gpt-5.4-mini",
+        collaborationMode: "plan",
+      }),
+    );
+    await expect(
+      handleCodexConversationInboundClaim(
+        {
+          content: "plan this",
+          bodyForAgent: "plan this",
+          channel: "telegram",
+          isGroup: false,
+          commandAuthorized: true,
+        },
+        bindingContext,
+        { pluginConfig, timeoutMs: 50 },
+      ),
+    ).resolves.toEqual({ handled: true, reply: { text: "done" } });
+
+    expect(turnStartParams[0]?.effort).toBe("medium");
+    expect(turnStartParams[0]?.collaborationMode).toEqual({
+      mode: "default",
+      settings: {
+        model: "gpt-5.4-mini",
+        reasoning_effort: "medium",
+        developer_instructions: null,
+      },
+    });
+    expect(turnStartParams[1]?.effort).toBe("xhigh");
+    expect(turnStartParams[1]?.collaborationMode).toEqual({
+      mode: "plan",
+      settings: {
+        model: "gpt-5.4-mini",
+        reasoning_effort: "xhigh",
+        developer_instructions: null,
+      },
+    });
+  });
+
+  it("returns approve and stay buttons when a plan-mode turn proposes a plan", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await fs.writeFile(
+      `${sessionFile}.codex-app-server.json`,
+      JSON.stringify({
+        schemaVersion: 1,
+        threadId: "thread-1",
+        cwd: tempDir,
+        model: "gpt-5.4-mini",
+        collaborationMode: "plan",
+      }),
+    );
+    let notificationHandler: ((notification: unknown) => void) | undefined;
+    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
+      request: vi.fn(async (method: string) => {
+        if (method !== "turn/start") {
+          throw new Error(`unexpected method: ${method}`);
+        }
+        setImmediate(() =>
+          notificationHandler?.({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: {
+                id: "turn-1",
+                status: "completed",
+                items: [
+                  {
+                    id: "plan-1",
+                    type: "plan",
+                    text: "<proposed_plan>Run the tests.</proposed_plan>",
+                  },
+                ],
+              },
+            },
+          }),
+        );
+        return { turn: { id: "turn-1" } };
+      }),
+      addNotificationHandler: vi.fn((handler: (notification: unknown) => void) => {
+        notificationHandler = handler;
+        return () => undefined;
+      }),
+      addRequestHandler: vi.fn(() => () => undefined),
+    });
+
+    const result = await handleCodexConversationInboundClaim(
+      {
+        content: "make a plan",
+        bodyForAgent: "make a plan",
+        channel: "telegram",
+        senderId: "user-1",
+        accountId: "default",
+        threadId: "chat-1",
+        sessionKey: "session-key",
+        isGroup: false,
+        commandAuthorized: true,
+      },
+      {
+        channelId: "telegram",
+        senderId: "user-1",
+        accountId: "default",
+        sessionKey: "session-key",
+        pluginBinding: {
+          bindingId: "binding-1",
+          pluginId: "codex",
+          pluginRoot: tempDir,
+          channel: "telegram",
+          accountId: "default",
+          conversationId: "5185575566",
+          boundAt: Date.now(),
+          data: {
+            kind: "codex-app-server-session",
+            version: 1,
+            sessionFile,
+            workspaceDir: tempDir,
+          },
+        },
+      },
+      { timeoutMs: 50 },
+    );
+
+    expect(result?.reply?.text).toBe("<proposed_plan>Run the tests.</proposed_plan>");
+    expect(readReplyButtons(result?.reply ?? {}).map((button) => button.label)).toEqual([
+      "Approve and execute",
+      "Approve and execute with clean context",
+      "Stay in plan mode",
+    ]);
+  });
+
+  it("delivers live progress updates for bound turns when enabled", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await fs.writeFile(
+      `${sessionFile}.codex-app-server.json`,
+      JSON.stringify({
+        schemaVersion: 1,
+        threadId: "thread-1",
+        cwd: tempDir,
+        liveProgress: true,
+      }),
+    );
+    let notificationHandler: ((notification: unknown) => void) | undefined;
+    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
+      request: vi.fn(async (method: string) => {
+        if (method !== "turn/start") {
+          throw new Error(`unexpected method: ${method}`);
+        }
+        setImmediate(() => {
+          notificationHandler?.({
+            method: "item/started",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              item: { id: "tool-1", type: "toolCall", tool: "shell" },
+            },
+          });
+          notificationHandler?.({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: {
+                id: "turn-1",
+                status: "completed",
+                items: [{ id: "assistant-1", type: "agentMessage", text: "done" }],
+              },
+            },
+          });
+        });
+        return { turn: { id: "turn-1" } };
+      }),
+      addNotificationHandler: vi.fn((handler: (notification: unknown) => void) => {
+        notificationHandler = handler;
+        return () => undefined;
+      }),
+      addRequestHandler: vi.fn(() => () => undefined),
+    });
+    const sendProgressReply = vi.fn(async () => undefined);
+
+    await expect(
+      handleCodexConversationInboundClaim(
+        {
+          content: "run",
+          bodyForAgent: "run",
+          channel: "telegram",
+          isGroup: false,
+          commandAuthorized: true,
+        },
+        {
+          channelId: "telegram",
+          pluginBinding: {
+            bindingId: "binding-1",
+            pluginId: "codex",
+            pluginRoot: tempDir,
+            channel: "telegram",
+            accountId: "default",
+            conversationId: "5185575566",
+            boundAt: Date.now(),
+            data: {
+              kind: "codex-app-server-session",
+              version: 1,
+              sessionFile,
+              workspaceDir: tempDir,
+            },
+          },
+        },
+        { timeoutMs: 50, sendProgressReply },
+      ),
+    ).resolves.toEqual({ handled: true, reply: { text: "done" } });
+
+    expect(sendProgressReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: { text: "Codex started shell (toolCall)." },
+      }),
+    );
+  });
+
+  it("routes Codex user-input requests through chat buttons", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await fs.writeFile(
+      `${sessionFile}.codex-app-server.json`,
+      JSON.stringify({
+        schemaVersion: 1,
+        threadId: "thread-1",
+        cwd: tempDir,
+      }),
+    );
+    let notificationHandler: ((notification: unknown) => void) | undefined;
+    let requestHandler:
+      | ((request: { method: string; params?: unknown }) => Promise<unknown>)
+      | undefined;
+    let userInputResponse: unknown;
+    const sendProgressReply = vi.fn(async ({ payload }) => {
+      const buttonValue = payload.interactive?.blocks[0]?.buttons?.[1]?.value ?? "";
+      const [token, answer] = buttonValue.split(" ").slice(2);
+      answerCodexUserInput({
+        token: token ?? "",
+        answerText: answer ?? "",
+        ctx: {
+          channel: "telegram",
+          senderId: "user-1",
+          accountId: "default",
+          sessionKey: "session-key",
+          messageThreadId: "chat-1",
+        },
+        sessionFile,
+      });
+    });
+    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
+      request: vi.fn(async (method: string) => {
+        if (method !== "turn/start") {
+          throw new Error(`unexpected method: ${method}`);
+        }
+        setImmediate(async () => {
+          userInputResponse = await requestHandler?.({
+            method: "item/tool/requestUserInput",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              itemId: "input-1",
+              questions: [
+                {
+                  id: "q1",
+                  header: "Mode",
+                  question: "Pick one",
+                  isOther: false,
+                  isSecret: false,
+                  options: [
+                    { label: "Plan", description: "Stay in plan" },
+                    { label: "Execute", description: "Run now" },
+                  ],
+                },
+              ],
+            },
+          });
+          notificationHandler?.({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: {
+                id: "turn-1",
+                status: "completed",
+                items: [{ id: "assistant-1", type: "agentMessage", text: "done" }],
+              },
+            },
+          });
+        });
+        return { turn: { id: "turn-1" } };
+      }),
+      addNotificationHandler: vi.fn((handler: (notification: unknown) => void) => {
+        notificationHandler = handler;
+        return () => undefined;
+      }),
+      addRequestHandler: vi.fn((handler) => {
+        requestHandler = handler;
+        return () => undefined;
+      }),
+    });
+
+    await expect(
+      handleCodexConversationInboundClaim(
+        {
+          content: "ask",
+          bodyForAgent: "ask",
+          channel: "telegram",
+          senderId: "user-1",
+          accountId: "default",
+          threadId: "chat-1",
+          sessionKey: "session-key",
+          isGroup: false,
+          commandAuthorized: true,
+        },
+        {
+          channelId: "telegram",
+          senderId: "user-1",
+          accountId: "default",
+          sessionKey: "session-key",
+          pluginBinding: {
+            bindingId: "binding-1",
+            pluginId: "codex",
+            pluginRoot: tempDir,
+            channel: "telegram",
+            accountId: "default",
+            conversationId: "5185575566",
+            boundAt: Date.now(),
+            data: {
+              kind: "codex-app-server-session",
+              version: 1,
+              sessionFile,
+              workspaceDir: tempDir,
+            },
+          },
+        },
+        { timeoutMs: 50, sendProgressReply },
+      ),
+    ).resolves.toEqual({ handled: true, reply: { text: "done" } });
+
+    expect(sendProgressReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          text: expect.stringContaining("Codex needs input:"),
+        }),
+      }),
+    );
+    expect(userInputResponse).toEqual({ answers: { q1: { answers: ["Execute"] } } });
+  });
+
   it("returns a clean failure reply when app-server turn start rejects", async () => {
     const sessionFile = path.join(tempDir, "session.jsonl");
     const agentDir = path.join(tempDir, "agents", "bot-b", "agent");
@@ -1201,183 +1663,5 @@ describe("codex conversation binding", () => {
     expect(turnStartParams[0]?.sandboxPolicy).toEqual({
       type: "dangerFullAccess",
     });
-  });
-
-  it("blocks Guardian-mode bound turns with stale no-approval policy on custom model providers", async () => {
-    const sessionFile = path.join(tempDir, "session.jsonl");
-    await fs.writeFile(
-      `${sessionFile}.codex-app-server.json`,
-      JSON.stringify({
-        schemaVersion: 1,
-        threadId: "thread-1",
-        cwd: tempDir,
-        model: "local-model",
-        modelProvider: "lmstudio",
-        approvalPolicy: "never",
-        sandbox: "danger-full-access",
-      }),
-    );
-    let notificationHandler: ((notification: unknown) => void) | undefined;
-    const turnStartParams: Record<string, unknown>[] = [];
-    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
-      request: vi.fn(async (method: string, requestParams: Record<string, unknown>) => {
-        if (method === "turn/start") {
-          turnStartParams.push(requestParams);
-          setImmediate(() =>
-            notificationHandler?.({
-              method: "turn/completed",
-              params: {
-                threadId: "thread-1",
-                turn: {
-                  id: "turn-1",
-                  status: "completed",
-                  items: [{ type: "agentMessage", id: "item-1", text: "done" }],
-                },
-              },
-            }),
-          );
-          return { turn: { id: "turn-1" } };
-        }
-        throw new Error(`unexpected method: ${method}`);
-      }),
-      addNotificationHandler: vi.fn((handler: (notification: unknown) => void) => {
-        notificationHandler = handler;
-        return () => undefined;
-      }),
-      addRequestHandler: vi.fn(() => () => undefined),
-    });
-
-    const result = await handleCodexConversationInboundClaim(
-      {
-        content: "hello",
-        channel: "telegram",
-        isGroup: false,
-        commandAuthorized: true,
-      },
-      {
-        channelId: "telegram",
-        pluginBinding: {
-          bindingId: "binding-1",
-          pluginId: "codex",
-          pluginRoot: tempDir,
-          channel: "telegram",
-          accountId: "default",
-          conversationId: "5185575566",
-          boundAt: Date.now(),
-          data: {
-            kind: "codex-app-server-session",
-            version: 1,
-            sessionFile,
-            workspaceDir: tempDir,
-          },
-        },
-      },
-      {
-        timeoutMs: 50,
-        pluginConfig: {
-          appServer: {
-            mode: "guardian",
-          },
-        },
-      },
-    );
-
-    expect(result?.handled).toBe(true);
-    expect(result?.reply?.text).toContain(
-      "OpenClaw native Codex conversation binding cannot route interactive approvals yet",
-    );
-    expect(turnStartParams).toEqual([]);
-    expect(sharedClientMocks.getSharedCodexAppServerClient).not.toHaveBeenCalled();
-  });
-
-  it("infers custom model providers for legacy bound turns without stored modelProvider", async () => {
-    const sessionFile = path.join(tempDir, "session.jsonl");
-    await fs.writeFile(
-      `${sessionFile}.codex-app-server.json`,
-      JSON.stringify({
-        schemaVersion: 1,
-        threadId: "thread-1",
-        cwd: tempDir,
-        model: "lmstudio/local-model",
-        approvalPolicy: "on-request",
-        sandbox: "workspace-write",
-      }),
-    );
-    let notificationHandler: ((notification: unknown) => void) | undefined;
-    const turnStartParams: Record<string, unknown>[] = [];
-    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
-      request: vi.fn(async (method: string, requestParams: Record<string, unknown>) => {
-        if (method === "turn/start") {
-          turnStartParams.push(requestParams);
-          setImmediate(() =>
-            notificationHandler?.({
-              method: "turn/completed",
-              params: {
-                threadId: "thread-1",
-                turn: {
-                  id: "turn-1",
-                  status: "completed",
-                  items: [{ type: "agentMessage", id: "item-1", text: "done" }],
-                },
-              },
-            }),
-          );
-          return { turn: { id: "turn-1" } };
-        }
-        throw new Error(`unexpected method: ${method}`);
-      }),
-      addNotificationHandler: vi.fn((handler: (notification: unknown) => void) => {
-        notificationHandler = handler;
-        return () => undefined;
-      }),
-      addRequestHandler: vi.fn(() => () => undefined),
-    });
-
-    await expect(
-      handleCodexConversationInboundClaim(
-        {
-          content: "hello",
-          channel: "telegram",
-          isGroup: false,
-          commandAuthorized: true,
-        },
-        {
-          channelId: "telegram",
-          pluginBinding: {
-            bindingId: "binding-1",
-            pluginId: "codex",
-            pluginRoot: tempDir,
-            channel: "telegram",
-            accountId: "default",
-            conversationId: "5185575566",
-            boundAt: Date.now(),
-            data: {
-              kind: "codex-app-server-session",
-              version: 1,
-              sessionFile,
-              workspaceDir: tempDir,
-            },
-          },
-        },
-        {
-          timeoutMs: 50,
-          pluginConfig: {
-            appServer: {
-              mode: "guardian",
-            },
-          },
-        },
-      ),
-    ).resolves.toMatchObject({
-      handled: true,
-      reply: {
-        text: expect.stringContaining(
-          "OpenClaw native Codex conversation binding cannot route interactive approvals yet",
-        ),
-      },
-    });
-
-    expect(turnStartParams).toEqual([]);
-    expect(sharedClientMocks.getSharedCodexAppServerClient).not.toHaveBeenCalled();
   });
 });
