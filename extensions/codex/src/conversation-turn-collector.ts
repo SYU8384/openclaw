@@ -144,7 +144,6 @@ export function createCodexConversationTurnCollector(
       }
       rememberPlanItem(itemId);
       planTextByItem.set(itemId, `${planTextByItem.get(itemId) ?? ""}${delta}`);
-      emitProgress(`Codex plan:\n${planTextByItem.get(itemId) ?? ""}`, `plan:${itemId}`);
       return;
     }
     if (notification.method === "turn/plan/updated") {
