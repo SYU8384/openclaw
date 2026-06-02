@@ -17,7 +17,10 @@ import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
  */
 export type EmbeddedAgentQueueHandle = {
   kind?: "embedded";
-  queueMessage: (text: string, options?: EmbeddedAgentQueueMessageOptions) => Promise<void>;
+  queueMessage: (
+    text: string,
+    options?: EmbeddedAgentQueueMessageOptions,
+  ) => Promise<EmbeddedAgentQueueMessageResult | void>;
   isStreaming: () => boolean;
   isCompacting: () => boolean;
   supportsTranscriptCommitWait?: boolean;
@@ -33,6 +36,15 @@ export type EmbeddedAgentQueueMessageOptions = {
   waitForTranscriptCommit?: boolean;
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
 };
+
+export type EmbeddedAgentQueueMessageResult =
+  | {
+      kind: "queued";
+    }
+  | {
+      kind: "answered_user_input";
+      message: string;
+    };
 
 export type ActiveEmbeddedRunSnapshot = {
   transcriptLeafId: string | null;
