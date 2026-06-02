@@ -3,6 +3,11 @@
     "skillWorkshop.header.useCurrentChat",
     "skillWorkshop.header.useCurrentChatAria",
     "skillWorkshop.header.useCurrentChatTooltip",
+    "skillWorkshop.modeSwitcher.board",
+    "skillWorkshop.modeSwitcher.boardTitle",
+    "skillWorkshop.modeSwitcher.label",
+    "skillWorkshop.modeSwitcher.today",
+    "skillWorkshop.modeSwitcher.todayTitle",
     "workboard.dependencies",
     "workboard.dependenciesBlocked",
     "workboard.dependenciesBlockedTitle",
@@ -32,12 +37,12 @@
     "workboard.unknownStatus",
     "workboard.viewDetails"
   ],
-  "generatedAt": "2026-06-05T02:10:20.929Z",
+  "generatedAt": "2026-06-06T07:20:07.733Z",
   "locale": "zh-CN",
   "model": "claude-opus-4-8",
   "provider": "anthropic",
-  "sourceHash": "f70b6a841addd3bd15207867930a15d303b1d8408de36584925865436cfeb4f7",
-  "totalKeys": 1333,
+  "sourceHash": "8d28f3e530b7b7fe3e420a5273d5c22510d972ab2a0d07428182864eb7895d2b",
+  "totalKeys": 1338,
   "translatedKeys": 1302,
   "workflow": 1
 }
