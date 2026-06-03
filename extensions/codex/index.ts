@@ -333,7 +333,9 @@ function registerCodexUserInputInteractiveHandlers(
         if (shouldClearResolvedCodexControl(result)) {
           await ctx.respond.clearButtons?.();
         }
-        await ctx.respond.reply({ text: result.message });
+        if (result.message) {
+          await ctx.respond.reply({ text: result.message });
+        }
         return { handled: true };
       }
       let acknowledgedConsumedPlan = false;
@@ -399,8 +401,10 @@ function registerCodexUserInputInteractiveHandlers(
         if (shouldClearResolvedCodexControl(result)) {
           await resolveDiscordCodexControls(ctx.respond);
         }
-        const respond = result.consumed ? ctx.respond.reply : ctx.respond.followUp;
-        await (respond ?? ctx.respond.reply)({ text: result.message, ephemeral: true });
+        if (result.message) {
+          const respond = result.consumed ? ctx.respond.reply : ctx.respond.followUp;
+          await (respond ?? ctx.respond.reply)({ text: result.message, ephemeral: true });
+        }
         return { handled: true };
       }
       const planResult = await handleCodexPlanDecisionCallbackLazy({
@@ -457,7 +461,9 @@ function registerCodexUserInputInteractiveHandlers(
         if (shouldClearResolvedCodexControl(result)) {
           await ctx.respond.editMessage?.({ blocks: [] });
         }
-        await ctx.respond.reply({ text: result.message });
+        if (result.message) {
+          await ctx.respond.reply({ text: result.message });
+        }
         return { handled: true };
       }
       let acknowledgedConsumedPlan = false;
