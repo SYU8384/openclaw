@@ -18,6 +18,7 @@ export type TelegramInteractiveHandlerContext = {
   callbackId: string;
   conversationId: string;
   parentConversationId?: string;
+  sessionKey?: string;
   senderId?: string;
   senderUsername?: string;
   threadId?: number;

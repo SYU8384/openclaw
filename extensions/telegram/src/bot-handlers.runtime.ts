@@ -2122,6 +2122,16 @@ export const registerTelegramHandlers = ({
         return;
       }
       const runtimeCfg = telegramDeps.getRuntimeConfig();
+      const callbackSessionState = resolveTelegramSessionState({
+        chatId,
+        isGroup,
+        isForum,
+        messageThreadId,
+        resolvedThreadId,
+        botHasTopicsEnabled: resolveTelegramBotHasTopicsEnabled(ctx.me),
+        senderId,
+        runtimeCfg,
+      });
       const pluginCallback = await dispatchTelegramPluginInteractiveHandler({
         data: pluginCallbackData,
         callbackId: callback.id,
@@ -2130,6 +2140,7 @@ export const registerTelegramHandlers = ({
           callbackId: callback.id,
           conversationId: callbackConversationId,
           parentConversationId: callbackThreadId != null ? String(chatId) : undefined,
+          sessionKey: callbackSessionState.sessionKey,
           senderId: senderId || undefined,
           senderUsername: senderUsername || undefined,
           threadId: callbackThreadId,
