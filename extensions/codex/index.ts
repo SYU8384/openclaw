@@ -1,7 +1,13 @@
+import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/channel-send-result";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { mutateConfigFile } from "openclaw/plugin-sdk/config-mutation";
+import {
+  adaptMessagePresentationForChannel,
+  normalizeMessagePresentation,
+} from "openclaw/plugin-sdk/interactive-runtime";
 import { resolveLivePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { definePluginEntry, type PluginCommandContext } from "openclaw/plugin-sdk/plugin-entry";
+import type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
 import { createCodexAppServerAgentHarness } from "./harness.js";
 import { buildCodexMediaUnderstandingProvider } from "./media-understanding-provider.js";
 import { buildCodexProvider } from "./provider.js";
@@ -15,7 +21,6 @@ import {
   answerCodexUserInputFreeform,
   resolveCodexUserInputCallback,
 } from "./src/conversation-chat-controls.js";
-import { buildCodexConversationProgressReply } from "./src/conversation-progress-reply.js";
 import { buildCodexMigrationProvider } from "./src/migration/provider.js";
 import {
   createCodexCliSessionNodeHostCommands,
@@ -49,11 +54,6 @@ export default definePluginEntry({
     registerCodexUserInputInteractiveHandlers(api, {
       resolveCurrentConfig,
       resolveCurrentPluginConfig,
-      loadChannelOutboundAdapter: (channel) => api.runtime.channel.outbound.loadAdapter(channel as never),
-      resolveRuntimeConfig: () =>
-        api.runtime.config?.current
-          ? (api.runtime.config.current() as OpenClawConfig)
-          : (api.config ?? ({} as OpenClawConfig)),
     });
     for (const command of createCodexCliSessionNodeHostCommands()) {
       api.registerNodeHostCommand(command);
@@ -65,16 +65,6 @@ export default definePluginEntry({
       createCodexCommand({
         pluginConfig: api.pluginConfig,
         deps: {
-          buildPlanApprovalProgressReply: (channel) =>
-            buildCodexConversationProgressReply(channel, {
-              loadAdapter: (ch) =>
-                api.runtime.channel.outbound.loadAdapter(ch as never),
-              resolveConfig: () =>
-                api.runtime.config?.current
-                  ? (api.runtime.config.current() as OpenClawConfig)
-                  : (api.config ?? ({} as OpenClawConfig)),
-              logWarn: (message, details) => console.warn(message, details),
-            }),
           listCodexCliSessionsOnNode: (params) =>
             listCodexCliSessionsOnNode({ runtime: api.runtime, ...params }),
           resolveCodexCliSessionForBindingOnNode: (params) =>
@@ -142,29 +132,58 @@ export default definePluginEntry({
         config: resolveCurrentConfig(),
         resumeCodexCliSessionOnNode: (params) =>
           resumeCodexCliSessionOnNode({ runtime: api.runtime, ...params }),
-        sendProgressReply: buildCodexConversationProgressReply(
-          typeof event.channel === "string" ? event.channel : "telegram",
-          {
-            loadAdapter: (channel) =>
-              api.runtime.channel.outbound.loadAdapter(channel as never),
-            resolveConfig: () =>
-              api.runtime.config?.current
-                ? (api.runtime.config.current() as OpenClawConfig)
-                : (api.config ?? ({} as OpenClawConfig)),
-            logWarn: (message, details) => console.warn(message, details),
-          },
-        ),
+        sendProgressReply: async ({ event: replyEvent, ctx: replyCtx, payload }) => {
+          const adapter = await api.runtime.channel.outbound.loadAdapter(
+            replyEvent.channel as never,
+          );
+          const to = resolveProgressReplyTarget(replyEvent, replyCtx);
+          if (!adapter || !to) {
+            return;
+          }
+          const cfg = api.runtime.config?.current
+            ? (api.runtime.config.current() as OpenClawConfig)
+            : api.config;
+          const threadId = replyEvent.threadId;
+          const accountId =
+            replyEvent.accountId ?? replyCtx.accountId ?? replyCtx.pluginBinding?.accountId;
+          if (adapter.sendPayload) {
+            const payloadContext = {
+              cfg,
+              to,
+              text: payload.text ?? "",
+              payload,
+              ...(accountId ? { accountId } : {}),
+              ...(threadId != null ? { threadId } : {}),
+            };
+            const renderedPayload = await renderCodexProgressReplyPayload({
+              adapter,
+              payload,
+              payloadContext,
+            });
+            await adapter.sendPayload({
+              ...payloadContext,
+              text: renderedPayload.text ?? "",
+              payload: renderedPayload,
+            });
+            return;
+          }
+          if (payload.text && adapter.sendText) {
+            await adapter.sendText({
+              cfg,
+              to,
+              text: payload.text,
+              ...(accountId ? { accountId } : {}),
+              ...(threadId != null ? { threadId } : {}),
+            });
+          }
+        },
       }),
     );
     api.on("before_dispatch", (event, ctx) => {
-      const channel = event.channel ?? ctx.channelId;
-      if (!channel) {
-        return undefined;
-      }
       const result = answerCodexUserInputFreeform({
         answerText: (event.body ?? event.content).trim(),
         ctx: {
-          channel,
+          channel: event.channel ?? ctx.channelId,
           accountId: event.accountId ?? ctx.accountId,
           senderId: event.senderId ?? ctx.senderId,
           sessionKey: event.sessionKey ?? ctx.sessionKey,
@@ -183,6 +202,40 @@ export default definePluginEntry({
 type CodexInteractiveResult = {
   handled?: boolean;
 };
+
+type CodexProgressReplyPayloadContext = Parameters<
+  NonNullable<ChannelOutboundAdapter["sendPayload"]>
+>[0];
+
+async function renderCodexProgressReplyPayload(params: {
+  adapter: Pick<ChannelOutboundAdapter, "presentationCapabilities" | "renderPresentation">;
+  payload: ReplyPayload;
+  payloadContext: CodexProgressReplyPayloadContext;
+}): Promise<ReplyPayload> {
+  const presentation = normalizeMessagePresentation(params.payload.presentation);
+  if (!presentation) {
+    return params.payload;
+  }
+  const adaptedPresentation = adaptMessagePresentationForChannel({
+    presentation,
+    capabilities: params.adapter.presentationCapabilities,
+  });
+  const adaptedPayload = { ...params.payload, presentation: adaptedPresentation };
+  const renderContext = {
+    ...params.payloadContext,
+    text: adaptedPayload.text ?? "",
+    payload: adaptedPayload,
+  };
+  return (
+    (params.adapter.renderPresentation
+      ? await params.adapter.renderPresentation({
+          payload: adaptedPayload,
+          presentation: adaptedPresentation,
+          ctx: renderContext,
+        })
+      : null) ?? adaptedPayload
+  );
+}
 
 type CodexInteractiveRegistration = {
   channel: "telegram" | "discord" | "slack";
@@ -267,8 +320,6 @@ function registerCodexUserInputInteractiveHandlers(
   options: {
     resolveCurrentConfig?: () => OpenClawConfig | undefined;
     resolveCurrentPluginConfig?: () => unknown;
-    loadChannelOutboundAdapter?: (channel: string) => Promise<import("openclaw/plugin-sdk/channel-send-result").ChannelOutboundAdapter | null | undefined>;
-    resolveRuntimeConfig?: () => OpenClawConfig;
   } = {},
 ): void {
   api.registerInteractiveHandler?.({
@@ -301,9 +352,7 @@ function registerCodexUserInputInteractiveHandlers(
         if (shouldClearResolvedCodexControl(result)) {
           await ctx.respond.clearButtons?.();
         }
-        if (result.message) {
-          await ctx.respond.reply({ text: result.message });
-        }
+        await ctx.respond.reply({ text: result.message });
         return { handled: true };
       }
       let acknowledgedConsumedPlan = false;
@@ -320,14 +369,6 @@ function registerCodexUserInputInteractiveHandlers(
         }),
         pluginConfig: options.resolveCurrentPluginConfig?.(),
         payload: ctx.callback.payload,
-        deps: {
-          buildPlanApprovalProgressReply: (channel) =>
-            buildCodexConversationProgressReply(channel, {
-              loadAdapter: async (ch) => options.loadChannelOutboundAdapter?.(ch),
-              resolveConfig: () => options.resolveRuntimeConfig?.() ?? {},
-              logWarn: (message, details) => console.warn(message, details),
-            }),
-        },
         onConsumed: async () => {
           acknowledgedConsumedPlan = true;
           await acknowledgeTelegramCodexControlConsumed(ctx.respond);
@@ -352,13 +393,10 @@ function registerCodexUserInputInteractiveHandlers(
       const ctx = rawCtx as {
         accountId: string;
         senderId?: string;
-        sessionKey?: string;
-        threadId?: string;
         interaction: { payload: string };
         auth?: { isAuthorizedSender?: boolean };
         respond: {
           reply: (params: { text: string; ephemeral?: boolean }) => Promise<void>;
-          followUp?: (params: { text: string; ephemeral?: boolean }) => Promise<void>;
           clearComponents?: (params?: { text?: string }) => Promise<void>;
           disableComponents?: () => Promise<void>;
         };
@@ -369,18 +407,13 @@ function registerCodexUserInputInteractiveHandlers(
           channel: "discord",
           accountId: ctx.accountId,
           senderId: ctx.senderId,
-          sessionKey: ctx.sessionKey,
-          messageThreadId: ctx.threadId,
         },
       });
       if (result.matched) {
         if (shouldClearResolvedCodexControl(result)) {
           await resolveDiscordCodexControls(ctx.respond);
         }
-        if (result.message) {
-          const respond = result.consumed ? ctx.respond.reply : ctx.respond.followUp;
-          await (respond ?? ctx.respond.reply)({ text: result.message, ephemeral: true });
-        }
+        await ctx.respond.reply({ text: result.message, ephemeral: true });
         return { handled: true };
       }
       const planResult = await handleCodexPlanDecisionCallbackLazy({
@@ -388,22 +421,12 @@ function registerCodexUserInputInteractiveHandlers(
           channel: "discord",
           accountId: ctx.accountId,
           senderId: ctx.senderId,
-          sessionKey: ctx.sessionKey,
-          messageThreadId: ctx.threadId,
           isAuthorizedSender: ctx.auth?.isAuthorizedSender,
           config: options.resolveCurrentConfig?.() ?? api.config ?? {},
           bindingHelpers: ctx,
         }),
         pluginConfig: options.resolveCurrentPluginConfig?.(),
         payload: ctx.interaction.payload,
-        deps: {
-          buildPlanApprovalProgressReply: (channel) =>
-            buildCodexConversationProgressReply(channel, {
-              loadAdapter: async (ch) => options.loadChannelOutboundAdapter?.(ch),
-              resolveConfig: () => options.resolveRuntimeConfig?.() ?? {},
-              logWarn: (message, details) => console.warn(message, details),
-            }),
-        },
         onConsumed: async () => {
           await acknowledgeDiscordCodexControlConsumed(ctx.respond);
         },
@@ -445,9 +468,7 @@ function registerCodexUserInputInteractiveHandlers(
         if (shouldClearResolvedCodexControl(result)) {
           await ctx.respond.editMessage?.({ blocks: [] });
         }
-        if (result.message) {
-          await ctx.respond.reply({ text: result.message });
-        }
+        await ctx.respond.reply({ text: result.message });
         return { handled: true };
       }
       let acknowledgedConsumedPlan = false;
@@ -463,14 +484,6 @@ function registerCodexUserInputInteractiveHandlers(
         }),
         pluginConfig: options.resolveCurrentPluginConfig?.(),
         payload: ctx.interaction.payload,
-        deps: {
-          buildPlanApprovalProgressReply: (channel) =>
-            buildCodexConversationProgressReply(channel, {
-              loadAdapter: async (ch) => options.loadChannelOutboundAdapter?.(ch),
-              resolveConfig: () => options.resolveRuntimeConfig?.() ?? {},
-              logWarn: (message, details) => console.warn(message, details),
-            }),
-        },
         onConsumed: async () => {
           acknowledgedConsumedPlan = true;
           await acknowledgeSlackCodexControlConsumed(ctx.respond);
@@ -540,13 +553,15 @@ function buildCodexInteractiveCommandContext(params: {
   };
 }
 
-function resolveProgressReplyTarget_legacy(
+function resolveProgressReplyTarget(
   event: {
     conversationId?: string;
     metadata?: Record<string, unknown>;
   },
   ctx?: {
-    pluginBinding?: { conversationId?: string };
+    pluginBinding?: {
+      conversationId?: string;
+    };
   },
 ) {
   if (event.conversationId?.trim()) {
@@ -558,4 +573,3 @@ function resolveProgressReplyTarget_legacy(
   const to = event.metadata?.to;
   return typeof to === "string" && to.trim() ? to.trim() : undefined;
 }
-void resolveProgressReplyTarget_legacy;
