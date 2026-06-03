@@ -57,6 +57,18 @@ export class CodexAppServerRpcError extends Error {
   }
 }
 
+export class CodexAppServerServerRequestError extends Error {
+  readonly code?: number;
+  readonly data?: JsonValue;
+
+  constructor(error: { code?: number; message: string; data?: JsonValue }) {
+    super(error.message);
+    this.name = "CodexAppServerServerRequestError";
+    this.code = error.code;
+    this.data = error.data;
+  }
+}
+
 function formatCodexAppServerRpcErrorMessage(
   error: { message: string; data?: JsonValue },
   method: string,
@@ -455,7 +467,13 @@ export class CodexAppServerClient {
       this.writeMessage({
         id: request.id,
         error: {
+          ...(error instanceof CodexAppServerServerRequestError && error.code !== undefined
+            ? { code: error.code }
+            : {}),
           message: error instanceof Error ? error.message : String(error),
+          ...(error instanceof CodexAppServerServerRequestError && error.data !== undefined
+            ? { data: error.data }
+            : {}),
         },
       });
     }
