@@ -1045,7 +1045,7 @@ export function buildTurnStartParams(
     skillsCollaborationInstructions?: string;
     memoryCollaborationInstructions?: string;
     heartbeatCollaborationInstructions?: string;
-    collaborationMode?: CodexTurnCollaborationMode;
+    collaborationMode?: CodexTurnCollaborationMode | string;
     reasoningEffort?: CodexAppServerReasoningEffort;
   },
 ): CodexTurnStartParams {
