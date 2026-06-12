@@ -1121,7 +1121,9 @@ describe("codex plugin", () => {
         payload: expect.objectContaining({
           text: "Codex needs input:",
           presentation: expect.objectContaining({
-            blocks: [expect.objectContaining({ buttons: [expect.objectContaining({ label: "Plan" })] })],
+            blocks: [
+              expect.objectContaining({ buttons: [expect.objectContaining({ label: "Plan" })] }),
+            ],
           }),
         }),
       }),
