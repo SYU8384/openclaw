@@ -28,6 +28,10 @@ import {
   type CodexAppServerSandboxMode,
   type OpenClawExecPolicyForCodexAppServer,
 } from "./app-server/config.js";
+import {
+  routeCodexBoundApproval,
+  type PluginApprovalRunContext,
+} from "./app-server/plugin-approval-roundtrip.js";
 import type {
   CodexServiceTier,
   CodexThreadResumeResponse,
@@ -590,6 +594,22 @@ async function runBoundTurn(params: {
     ...agentLookup,
   });
   const collector = createCodexConversationTurnCollector(threadId);
+  const boundAgentId = params.config
+    ? resolveSessionAgentIds({
+        sessionKey: params.sessionKey,
+        config: params.config,
+      }).sessionAgentId
+    : undefined;
+  const approvalRunContext: PluginApprovalRunContext = {
+    agentId: boundAgentId,
+    sessionKey: params.sessionKey,
+    messageChannel: params.event.channel,
+    currentChannelId:
+      params.event.conversationId ??
+      (typeof params.event.threadId === "string" ? params.event.threadId : undefined),
+    agentAccountId: params.event.accountId,
+    currentThreadTs: typeof params.event.threadId === "string" ? params.event.threadId : undefined,
+  };
   const notificationCleanup = client.addNotificationHandler((notification) =>
     collector.handleNotification(notification),
   );
@@ -608,16 +628,14 @@ async function runBoundTurn(params: {
       }
       if (
         request.method === "item/commandExecution/requestApproval" ||
-        request.method === "item/fileChange/requestApproval"
+        request.method === "item/fileChange/requestApproval" ||
+        request.method === "item/permissions/requestApproval"
       ) {
-        return {
-          decision: "decline",
-          reason:
-            "OpenClaw native Codex conversation binding cannot route interactive approvals yet; use the Codex harness or explicit /acp spawn codex for that workflow.",
-        };
-      }
-      if (request.method === "item/permissions/requestApproval") {
-        return { permissions: {}, scope: "turn" };
+        return routeCodexBoundApproval({
+          method: request.method,
+          requestParams: request.params,
+          paramsForRun: approvalRunContext,
+        });
       }
       if (request.method.includes("requestApproval")) {
         return {
