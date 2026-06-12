@@ -73,9 +73,11 @@ import {
 import {
   answerCodexUserInputFreeform,
   buildCodexPlanDecisionReply,
+  buildCodexUserInputSequentialPrompt,
   cancelCodexUserInput,
   CODEX_PENDING_CONTROL_TTL_MS,
   createCodexUserInputPromptControl,
+  createCodexUserInputSequentialControl,
   hasCodexProposedPlan,
   hasPendingCodexUserInput,
 } from "./conversation-chat-controls.js";
@@ -742,17 +744,66 @@ async function runBoundTurn(params: {
               reject(error);
             });
           };
+          const userInputScope = {
+            sessionFile: params.data.sessionFile,
+            threadId,
+            channel: params.event.channel,
+            senderId: params.event.senderId ?? params.ctx.senderId,
+            accountId: params.event.accountId ?? params.ctx.accountId,
+            sessionKey: params.event.sessionKey ?? params.ctx.sessionKey,
+            messageThreadId: params.event.threadId,
+          };
+          // Multi-question requests render one question at a time on
+          // bound chat sessions. Posting Q[i+1] only after Q[i] is
+          // answered keeps the chat surface from showing two button
+          // rows on a single message. The wire protocol still treats
+          // this as one request -> one merged response.
+          const sequentialEligible =
+            requestParams.questions.length > 1 &&
+            requestParams.questions.every(
+              (question) => !question.isSecret && (question.options?.length ?? 0) > 0,
+            );
+          if (sequentialEligible) {
+            const sequential = createCodexUserInputSequentialControl({
+              questions: requestParams.questions,
+              scope: userInputScope,
+              resolveText: (text) => finish(buildUserInputResponse(requestParams.questions, text)),
+              emitNextPrompt: async (nextIndex) => {
+                const nextPayload = buildCodexUserInputSequentialPrompt({
+                  token: sequential.token,
+                  questions: requestParams.questions,
+                  questionIndex: nextIndex,
+                });
+                await sendProgressReply(nextPayload).catch(() => undefined);
+              },
+            });
+            inputTimeout = setTimeout(() => {
+              cancelCodexUserInput({ token: sequential.token });
+              void interruptActiveTurnAfterUserInputTimeout()
+                .then(() =>
+                  fail(
+                    new CodexAppServerServerRequestError(
+                      CODEX_TURN_TRANSITION_SERVER_REQUEST_ERROR,
+                    ),
+                  ),
+                )
+                .catch((error: unknown) => {
+                  userInputTimeoutInterruptFailed = true;
+                  finish(emptyUserInputResponse());
+                  throw error;
+                })
+                .catch(() => undefined);
+            }, CODEX_PENDING_CONTROL_TTL_MS);
+            inputTimeout.unref?.();
+            void sendProgressReply(sequential.payload).catch(() => {
+              cancelCodexUserInput({ token: sequential.token });
+              finish(emptyUserInputResponse());
+            });
+            return;
+          }
           const { token, payload } = createCodexUserInputPromptControl({
             questions: requestParams.questions,
-            scope: {
-              sessionFile: params.data.sessionFile,
-              threadId,
-              channel: params.event.channel,
-              senderId: params.event.senderId ?? params.ctx.senderId,
-              accountId: params.event.accountId ?? params.ctx.accountId,
-              sessionKey: params.event.sessionKey ?? params.ctx.sessionKey,
-              messageThreadId: params.event.threadId,
-            },
+            scope: userInputScope,
             resolveText: (text) => finish(buildUserInputResponse(requestParams.questions, text)),
           });
           inputTimeout = setTimeout(() => {

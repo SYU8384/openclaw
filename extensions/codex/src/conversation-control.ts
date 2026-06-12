@@ -1,26 +1,30 @@
-// Codex plugin module implements conversation control behavior.
 import { CODEX_CONTROL_METHODS } from "./app-server/capabilities.js";
 import {
   isCodexFastServiceTier,
-  resolveCodexModelBackedReviewerPolicyContext,
+  readCodexPluginConfig,
   resolveCodexAppServerRuntimeOptions,
   type CodexAppServerApprovalPolicy,
   type CodexAppServerSandboxMode,
 } from "./app-server/config.js";
 import type { CodexServiceTier, CodexThreadResumeResponse } from "./app-server/protocol.js";
 import {
-  isCodexAppServerNativeAuthProfile,
+  readCodexAppServerConversationReasoningDefaults,
+  resolveCodexAppServerConversationReasoningEffort,
+  resolveCodexAppServerReasoningMode,
+  setCodexAppServerConversationReasoningDefault,
+  type CodexAppServerReasoningMode,
+} from "./app-server/reasoning-defaults.js";
+import {
   readCodexAppServerBinding,
   writeCodexAppServerBinding,
+  type CodexAppServerCollaborationMode,
+  type CodexAppServerConversationReasoningDefaults,
+  type CodexAppServerReasoningEffort,
 } from "./app-server/session-binding.js";
 import {
   getLeasedSharedCodexAppServerClient,
   releaseLeasedSharedCodexAppServerClient,
 } from "./app-server/shared-client.js";
-import {
-  resolveCodexAppServerRequestModelSelection,
-  resolveCodexBindingModelProviderFallback,
-} from "./app-server/thread-lifecycle.js";
 import { formatCodexDisplayText } from "./command-formatters.js";
 
 type ActiveTurn = {
@@ -32,6 +36,12 @@ type ActiveTurn = {
 type CodexAppServerBindingLookup = NonNullable<Parameters<typeof readCodexAppServerBinding>[1]>;
 
 type PermissionsMode = "default" | "yolo";
+type PlanMode = "default" | "plan";
+export type ParsedCodexReasoningEffortArg = {
+  mode?: CodexAppServerReasoningMode;
+  effort?: CodexAppServerReasoningEffort | "default";
+  status: boolean;
+};
 
 const CODEX_CONVERSATION_CONTROL_STATE = Symbol.for("openclaw.codex.conversationControl");
 
@@ -145,51 +155,24 @@ export async function setCodexConversationModel(params: {
   }
   const lookup = buildBindingLookup(params);
   const binding = await requireThreadBinding(params.sessionFile, lookup);
-  const reviewerPolicyContext = resolveCodexModelBackedReviewerPolicyContext({
-    provider: "codex",
-    model,
-    bindingModelProvider: binding.modelProvider,
-    bindingModel: binding.model,
-    nativeAuthProfile: isCodexAppServerNativeAuthProfile({
-      authProfileId: binding.authProfileId,
-      ...lookup,
-    }),
-  });
-  const runtime = resolveCodexAppServerRuntimeOptions({
-    pluginConfig: params.pluginConfig,
-    modelProvider: reviewerPolicyContext.modelProvider,
-    model: reviewerPolicyContext.model,
-    config: params.config,
-    agentDir: params.agentDir,
-  });
-  const modelProvider = resolveConversationControlModelProvider({
-    authProfileId: binding.authProfileId,
-    bindingModel: binding.model,
-    bindingModelProvider: binding.modelProvider,
-    currentModel: model,
-    ...lookup,
-  });
-  const modelSelection = resolveCodexAppServerRequestModelSelection({
-    model,
-    modelProvider,
-    authProfileId: binding.authProfileId,
-    ...lookup,
-  });
+  const runtime = resolveCodexAppServerRuntimeOptions({ pluginConfig: params.pluginConfig });
   const response = await resumeThreadWithOverrides({
-    runtime,
+    pluginConfig: params.pluginConfig,
     threadId: binding.threadId,
     authProfileId: binding.authProfileId,
     ...lookup,
-    model: modelSelection.model,
-    modelProvider: modelSelection.modelProvider,
+    model,
   });
   await writeCodexAppServerBinding(
     params.sessionFile,
     {
       ...binding,
       cwd: response.thread.cwd ?? binding.cwd,
-      model: response.model ?? modelSelection.model,
-      modelProvider: response.modelProvider ?? modelSelection.modelProvider,
+      model: response.model ?? model,
+      modelProvider: response.modelProvider ?? binding.modelProvider,
+      collaborationMode: binding.collaborationMode,
+      reasoningEffort: binding.reasoningEffort,
+      reasoningEffortDefaults: binding.reasoningEffortDefaults,
       approvalPolicy: binding.approvalPolicy,
       sandbox: binding.sandbox,
       serviceTier: binding.serviceTier ?? runtime.serviceTier,
@@ -275,6 +258,75 @@ export async function setCodexConversationPermissions(params: {
   return `Codex permissions set to ${params.mode === "yolo" ? "full access" : "default"}.`;
 }
 
+export async function setCodexConversationPlanMode(params: {
+  sessionFile: string;
+  mode?: PlanMode;
+  pluginConfig?: unknown;
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
+}): Promise<string> {
+  const lookup = buildBindingLookup(params);
+  const binding = await requireThreadBinding(params.sessionFile, lookup);
+  if (!params.mode) {
+    return `Codex plan mode: ${formatPlanMode(binding.collaborationMode)}. ${formatCurrentReasoningEffortStatus(
+      binding,
+      params.pluginConfig,
+    )}`;
+  }
+  const collaborationMode = params.mode === "plan" ? "plan" : "default";
+  await writeCodexAppServerBinding(
+    params.sessionFile,
+    {
+      ...binding,
+      collaborationMode,
+    },
+    lookup,
+  );
+  return `Codex plan mode ${params.mode === "plan" ? "enabled" : "disabled"}. ${formatCurrentReasoningEffortStatus(
+    { ...binding, collaborationMode },
+    params.pluginConfig,
+  )}`;
+}
+
+export async function setCodexConversationReasoningEffort(params: {
+  sessionFile: string;
+  parsed?: ParsedCodexReasoningEffortArg;
+  effort?: CodexAppServerReasoningEffort | "default";
+  mode?: CodexAppServerReasoningMode;
+  pluginConfig?: unknown;
+  agentDir?: string;
+  config?: CodexAppServerBindingLookup["config"];
+}): Promise<string> {
+  const lookup = buildBindingLookup(params);
+  const binding = await requireThreadBinding(params.sessionFile, lookup);
+  const command = params.parsed ?? {
+    effort: params.effort,
+    mode: params.mode,
+    status: !params.effort,
+  };
+  if (command.status || !command.effort) {
+    return formatReasoningEffortStatus(binding, params.pluginConfig);
+  }
+  const mode = command.mode ?? resolveCodexAppServerReasoningMode(binding.collaborationMode);
+  const reasoningEffortDefaults = setCodexAppServerConversationReasoningDefault(
+    binding.reasoningEffortDefaults,
+    mode,
+    command.effort === "default" ? undefined : command.effort,
+  );
+  await writeCodexAppServerBinding(
+    params.sessionFile,
+    {
+      ...binding,
+      reasoningEffort: undefined,
+      reasoningEffortDefaults,
+    },
+    lookup,
+  );
+  return command.effort === "default"
+    ? `Codex ${formatReasoningMode(mode)} think reset to default.`
+    : `Codex ${formatReasoningMode(mode)} think set to ${command.effort}.`;
+}
+
 export function parseCodexFastModeArg(arg: string | undefined): boolean | undefined {
   const normalized = arg?.trim().toLowerCase();
   if (!normalized || normalized === "status") {
@@ -317,6 +369,47 @@ export function parseCodexPermissionsModeArg(arg: string | undefined): Permissio
   return undefined;
 }
 
+export function parseCodexPlanModeArg(arg: string | undefined): PlanMode | undefined {
+  const normalized = arg?.trim().toLowerCase();
+  if (!normalized || normalized === "status") {
+    return undefined;
+  }
+  if (normalized === "on" || normalized === "true" || normalized === "plan") {
+    return "plan";
+  }
+  if (normalized === "off" || normalized === "false" || normalized === "default") {
+    return "default";
+  }
+  return undefined;
+}
+
+export function parseCodexReasoningEffortArg(
+  args: string | undefined | readonly string[],
+): ParsedCodexReasoningEffortArg | undefined {
+  const values = (Array.isArray(args) ? [...args] : args === undefined ? [] : [args])
+    .map((arg) => arg.trim().toLowerCase())
+    .filter(Boolean);
+  if (values.length === 0 || (values.length === 1 && values[0] === "status")) {
+    return { status: true };
+  }
+  if (values.length > 2) {
+    return undefined;
+  }
+  const mode = parseReasoningMode(values[0]);
+  if (!mode && values.length > 1) {
+    return undefined;
+  }
+  const value = mode ? values[1] : values[0];
+  if (!value || value === "status") {
+    return mode && values.length === 2 ? { mode, status: true } : undefined;
+  }
+  const effort = parseReasoningEffort(value);
+  if (!effort) {
+    return undefined;
+  }
+  return { ...(mode ? { mode } : {}), effort, status: false };
+}
+
 export function formatPermissionsMode(binding: {
   approvalPolicy?: CodexAppServerApprovalPolicy;
   sandbox?: CodexAppServerSandboxMode;
@@ -324,6 +417,92 @@ export function formatPermissionsMode(binding: {
   return binding.approvalPolicy === "never" && binding.sandbox === "danger-full-access"
     ? "full access"
     : "default";
+}
+
+export function formatPlanMode(mode: CodexAppServerCollaborationMode | undefined): string {
+  return mode === "plan" ? "on" : "off";
+}
+
+export function formatReasoningEffort(effort: CodexAppServerReasoningEffort | undefined): string {
+  return effort ?? "default";
+}
+
+function parseReasoningMode(value: string | undefined): CodexAppServerReasoningMode | undefined {
+  if (value === "plan") {
+    return "plan";
+  }
+  return value === "execute" || value === "execution" ? "execute" : undefined;
+}
+
+function parseReasoningEffort(
+  value: string,
+): CodexAppServerReasoningEffort | "default" | undefined {
+  if (
+    value === "default" ||
+    value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function formatReasoningMode(mode: CodexAppServerReasoningMode): string {
+  return mode === "plan" ? "plan-mode" : "execute-mode";
+}
+
+function readConfiguredReasoningDefaults(
+  pluginConfig: unknown,
+): CodexAppServerConversationReasoningDefaults | undefined {
+  return readCodexAppServerConversationReasoningDefaults(
+    readCodexPluginConfig(pluginConfig).appServer?.conversationReasoningDefaults,
+  );
+}
+
+function formatCurrentReasoningEffortStatus(
+  binding: {
+    collaborationMode?: CodexAppServerCollaborationMode;
+    reasoningEffort?: CodexAppServerReasoningEffort;
+    reasoningEffortDefaults?: CodexAppServerConversationReasoningDefaults;
+  },
+  pluginConfig: unknown,
+): string {
+  const current = resolveCodexAppServerConversationReasoningEffort({
+    mode: binding.collaborationMode,
+    bindingDefaults: binding.reasoningEffortDefaults,
+    legacyReasoningEffort: binding.reasoningEffort,
+    configDefaults: readConfiguredReasoningDefaults(pluginConfig),
+  });
+  return `Codex think: ${formatReasoningEffort(current)}.`;
+}
+
+function formatReasoningEffortStatus(
+  binding: {
+    collaborationMode?: CodexAppServerCollaborationMode;
+    reasoningEffort?: CodexAppServerReasoningEffort;
+    reasoningEffortDefaults?: CodexAppServerConversationReasoningDefaults;
+  },
+  pluginConfig: unknown,
+): string {
+  const configDefaults = readConfiguredReasoningDefaults(pluginConfig);
+  const current = resolveCodexAppServerConversationReasoningEffort({
+    mode: binding.collaborationMode,
+    bindingDefaults: binding.reasoningEffortDefaults,
+    legacyReasoningEffort: binding.reasoningEffort,
+    configDefaults,
+  });
+  const execute =
+    binding.reasoningEffortDefaults?.execute ?? binding.reasoningEffort ?? configDefaults?.execute;
+  const plan =
+    binding.reasoningEffortDefaults?.plan ?? binding.reasoningEffort ?? configDefaults?.plan;
+  return [
+    `Codex think: ${formatReasoningEffort(current)}.`,
+    `Execute default: ${formatReasoningEffort(execute)}.`,
+    `Plan default: ${formatReasoningEffort(plan)}.`,
+  ].join(" ");
 }
 
 async function requireThreadBinding(sessionFile: string, lookup: CodexAppServerBindingLookup = {}) {
@@ -335,18 +514,17 @@ async function requireThreadBinding(sessionFile: string, lookup: CodexAppServerB
 }
 
 async function resumeThreadWithOverrides(params: {
-  runtime: ReturnType<typeof resolveCodexAppServerRuntimeOptions>;
+  pluginConfig?: unknown;
   threadId: string;
   authProfileId?: string;
   agentDir?: string;
   config?: CodexAppServerBindingLookup["config"];
   model?: string;
-  modelProvider?: string | null;
   approvalPolicy?: CodexAppServerApprovalPolicy;
   sandbox?: CodexAppServerSandboxMode;
   serviceTier?: CodexServiceTier;
 }): Promise<CodexThreadResumeResponse> {
-  const runtime = params.runtime;
+  const runtime = resolveCodexAppServerRuntimeOptions({ pluginConfig: params.pluginConfig });
   const client = await getLeasedSharedCodexAppServerClient({
     startOptions: runtime.start,
     timeoutMs: runtime.requestTimeoutMs,
@@ -359,7 +537,6 @@ async function resumeThreadWithOverrides(params: {
       {
         threadId: params.threadId,
         ...(params.model ? { model: params.model } : {}),
-        ...(params.modelProvider ? { modelProvider: params.modelProvider } : {}),
         approvalPolicy: params.approvalPolicy ?? runtime.approvalPolicy,
         sandbox: params.sandbox ?? runtime.sandbox,
         approvalsReviewer: runtime.approvalsReviewer,
@@ -382,28 +559,6 @@ function buildBindingLookup(params: {
     ...(agentDir ? { agentDir } : {}),
     ...(params.config ? { config: params.config } : {}),
   };
-}
-
-function resolveConversationControlModelProvider(params: {
-  authProfileId?: string;
-  bindingModel?: string;
-  bindingModelProvider?: string;
-  currentModel?: string;
-  agentDir?: string;
-  config?: CodexAppServerBindingLookup["config"];
-}): string | undefined {
-  const modelProvider = resolveCodexBindingModelProviderFallback({
-    currentModel: params.currentModel,
-    bindingModel: params.bindingModel,
-    bindingModelProvider: params.bindingModelProvider,
-  })?.trim();
-  if (!modelProvider || modelProvider.toLowerCase() === "codex") {
-    return undefined;
-  }
-  if (isCodexAppServerNativeAuthProfile(params) && modelProvider.toLowerCase() === "openai") {
-    return undefined;
-  }
-  return modelProvider.toLowerCase() === "openai" ? "openai" : modelProvider;
 }
 
 function permissionsForMode(mode: PermissionsMode): {

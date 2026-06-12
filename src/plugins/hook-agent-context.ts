@@ -1,4 +1,3 @@
-/** Builds plugin hook agent context snapshots from active session and model state. */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { parseRawSessionConversationRef } from "../sessions/session-key-utils.js";
 import type { PluginHookAgentContext } from "./hook-types.js";
@@ -35,34 +34,6 @@ function stripConversationPrefix(
     return suffix;
   }
   return text;
-}
-
-function resolveAgentHookChannel(params: {
-  messageChannel?: string | null;
-  messageProvider?: string | null;
-}): string | undefined {
-  const messageChannel = normalizeOptionalString(params.messageChannel);
-  const provider = normalizeOptionalString(params.messageProvider);
-  if (!messageChannel) {
-    return provider;
-  }
-
-  const separatorIndex = messageChannel.indexOf(":");
-  if (separatorIndex === -1) {
-    return messageChannel;
-  }
-
-  const prefix = normalizeOptionalString(messageChannel.slice(0, separatorIndex));
-  if (!prefix) {
-    return provider;
-  }
-  if (
-    TARGET_PREFIXES.has(normalizeKey(prefix)) ||
-    normalizeKey(prefix) === normalizeKey(provider)
-  ) {
-    return provider;
-  }
-  return prefix;
 }
 
 /** Resolves the channel id exposed to plugin agent hooks. */
@@ -105,18 +76,9 @@ export function buildAgentHookContextChannelFields(params: {
   messageProvider?: string | null;
   currentChannelId?: string | null;
   messageTo?: string | null;
-  senderId?: string | null;
-}): Pick<
-  PluginHookAgentContext,
-  "channel" | "channelId" | "chatId" | "messageProvider" | "senderId"
-> {
-  const channel = resolveAgentHookChannel(params);
-  const channelId = resolveAgentHookChannelId(params);
+}): Pick<PluginHookAgentContext, "channelId" | "messageProvider"> {
   return {
-    channel,
     messageProvider: normalizeOptionalString(params.messageProvider),
-    channelId,
-    chatId: channelId,
-    senderId: normalizeOptionalString(params.senderId),
+    channelId: resolveAgentHookChannelId(params),
   };
 }

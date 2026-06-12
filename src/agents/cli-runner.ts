@@ -1,6 +1,3 @@
-/**
- * Top-level CLI-backed agent runner orchestration.
- */
 import type { ReplyPayload } from "../auto-reply/reply-payload.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { formatErrorMessage } from "../infra/errors.js";
@@ -47,12 +44,10 @@ const cliRunnerDeps = {
   },
 };
 
-/** Overrides top-level CLI runner dependencies for tests. */
 export function setCliRunnerTestDeps(overrides: Partial<typeof cliRunnerDeps>): void {
   Object.assign(cliRunnerDeps, overrides);
 }
 
-/** Restores default top-level CLI runner dependencies after tests. */
 export function restoreCliRunnerTestDeps(): void {
   cliRunnerDeps.claudeCliSessionTranscriptHasContent = claudeCliSessionTranscriptHasContentImpl;
   cliRunnerDeps.delay = async (delayMs: number) => {
@@ -85,7 +80,6 @@ function shouldRetryFreshCliSessionAfterFailover(params: {
   }
 }
 
-/** Checks whether a Claude CLI session binding has reached its transcript file. */
 export async function isCliBindingFlushed(
   sessionId: string | undefined,
   provider: string | undefined,
@@ -270,7 +264,6 @@ async function finalizeCliContextEngineTurn(params: {
     sessionIdUsed: runParams.sessionId,
     sessionKey: runParams.sessionKey,
     sessionFile: runParams.sessionFile,
-    isHeartbeat: runParams.bootstrapContextRunKind === "heartbeat",
     messagesSnapshot: [...prePromptMessages, ...turnMessages],
     prePromptMessageCount: prePromptMessages.length,
     config: context.contextEngineConfig,
@@ -288,7 +281,6 @@ async function finalizeCliContextEngineTurn(params: {
   }
 }
 
-/** Prepares and runs one CLI-backed agent turn. */
 export async function runCliAgent(params: RunCliAgentParams): Promise<EmbeddedAgentRunResult> {
   // Cron gate must fire before prepareCliRunContext — that call allocates
   // backend resources released only by runPreparedCliAgent's try…finally.
@@ -359,7 +351,6 @@ export async function runCliAgent(params: RunCliAgentParams): Promise<EmbeddedAg
   }
 }
 
-/** Runs an already-prepared CLI agent context through hooks and execution. */
 export async function runPreparedCliAgent(
   context: PreparedCliRunContext,
 ): Promise<EmbeddedAgentRunResult> {
@@ -750,8 +741,6 @@ export async function runPreparedCliAgent(
             }),
             channelId: hookContext.channelId,
             accountId: params.agentAccountId,
-            senderId: params.senderId ?? undefined,
-            senderIsOwner: params.senderIsOwner ?? undefined,
           },
           buildAgentHookContext(hookContext),
         );
@@ -861,13 +850,11 @@ export async function runPreparedCliAgent(
   }
 }
 
-/** Legacy Claude-specific wrapper params for the generic CLI runner. */
 export type RunClaudeCliAgentParams = Omit<RunCliAgentParams, "provider" | "cliSessionId"> & {
   provider?: string;
   claudeSessionId?: string;
 };
 
-/** Converts legacy Claude CLI wrapper params into generic CLI runner params. */
 export function buildRunClaudeCliAgentParams(params: RunClaudeCliAgentParams): RunCliAgentParams {
   return {
     sessionId: params.sessionId,
@@ -884,7 +871,6 @@ export function buildRunClaudeCliAgentParams(params: RunClaudeCliAgentParams): R
     model: params.model ?? "opus",
     thinkLevel: params.thinkLevel,
     timeoutMs: params.timeoutMs,
-    runTimeoutOverrideMs: params.runTimeoutOverrideMs,
     runId: params.runId,
     jobId: params.jobId,
     extraSystemPrompt: params.extraSystemPrompt,
@@ -903,12 +889,9 @@ export function buildRunClaudeCliAgentParams(params: RunClaudeCliAgentParams): R
     currentThreadTs: params.currentThreadTs,
     currentMessageId: params.currentMessageId,
     currentInboundAudio: params.currentInboundAudio,
-    senderId: params.senderId,
-    senderIsOwner: params.senderIsOwner,
   };
 }
 
-/** Runs the legacy Claude CLI wrapper through the generic CLI runner. */
 export async function runClaudeCliAgent(
   params: RunClaudeCliAgentParams,
 ): Promise<EmbeddedAgentRunResult> {

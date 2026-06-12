@@ -1107,9 +1107,11 @@ export function buildTurnCollaborationMode(
     memoryCollaborationInstructions?: string;
     heartbeatCollaborationInstructions?: string;
   } = {},
-): CodexTurnCollaborationMode {
+  ): CodexTurnCollaborationMode {
   const mode: string =
-    typeof options.mode === "string" ? options.mode : (options.mode?.mode ?? "default");
+    typeof options.mode === "string"
+      ? options.mode
+      : (options.mode?.mode ?? "default");
   return {
     mode,
     settings: {

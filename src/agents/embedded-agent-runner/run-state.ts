@@ -1,6 +1,3 @@
-/**
- * Shared process-local state for active and abandoned embedded-agent runs.
- */
 import type { SourceReplyDeliveryMode } from "../../auto-reply/get-reply-options.types.js";
 import {
   getActiveReplyRunCount,
@@ -30,7 +27,7 @@ export type EmbeddedAgentQueueHandle = {
 };
 
 export type EmbeddedAgentQueueMessageOptions = {
-  steeringMode?: "all";
+  steeringMode?: "all" | "user_input_only";
   debounceMs?: number;
   deliveryTimeoutMs?: number;
   waitForTranscriptCommit?: boolean;
@@ -44,6 +41,9 @@ export type EmbeddedAgentQueueMessageResult =
   | {
       kind: "answered_user_input";
       message: string;
+    }
+  | {
+      kind: "no_pending_user_input";
     };
 
 export type ActiveEmbeddedRunSnapshot = {
