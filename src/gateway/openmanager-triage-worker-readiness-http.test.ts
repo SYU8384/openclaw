@@ -42,7 +42,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  hasAuth.mockReset().mockImplementation(({ provider }) => provider === "minimax");
+  hasAuth.mockReset().mockImplementation(({ provider }) => provider === "minimax-portal");
 });
 
 describe("OpenManager triage worker readiness HTTP", () => {

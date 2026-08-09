@@ -12,7 +12,7 @@ const READINESS_PATH = "/v1/openmanager/triage-workers/readiness";
 const READINESS_OPERATOR_METHOD = "models.authStatus";
 
 const workers = [
-  { workerId: "minimax-primary", provider: "minimax" },
+  { workerId: "minimax-primary", provider: "minimax-portal" },
   { workerId: "deepseek-primary", provider: "deepseek" },
 ] as const;
 
