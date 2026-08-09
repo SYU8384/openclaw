@@ -85,6 +85,9 @@ let sessionKillHttpModulePromise: Promise<typeof import("./session-kill-http.js"
 let contextEngineControlHttpModulePromise:
   | Promise<typeof import("./context-engine-control-http.js")>
   | undefined;
+let openManagerTriageWorkerReadinessHttpModulePromise:
+  | Promise<typeof import("./openmanager-triage-worker-readiness-http.js")>
+  | undefined;
 let toolsInvokeHttpModulePromise: Promise<typeof import("./tools-invoke-http.js")> | undefined;
 let pluginNodeCapabilityAuthModulePromise:
   | Promise<typeof import("./server/plugin-node-capability-auth.js")>
@@ -142,6 +145,12 @@ function getSessionKillHttpModule() {
 function getContextEngineControlHttpModule() {
   contextEngineControlHttpModulePromise ??= import("./context-engine-control-http.js");
   return contextEngineControlHttpModulePromise;
+}
+
+function getOpenManagerTriageWorkerReadinessHttpModule() {
+  openManagerTriageWorkerReadinessHttpModulePromise ??=
+    import("./openmanager-triage-worker-readiness-http.js");
+  return openManagerTriageWorkerReadinessHttpModulePromise;
 }
 
 function getToolsInvokeHttpModule() {
@@ -233,6 +242,10 @@ function isContextEngineControlPath(pathname: string): boolean {
   return (
     pathname === "/v1/context-engine/capabilities" || pathname === "/v1/context-engine/control"
   );
+}
+
+function isOpenManagerTriageWorkerReadinessPath(pathname: string): boolean {
+  return pathname === "/v1/openmanager/triage-workers/readiness";
 }
 
 function isManagedOutgoingImagePath(pathname: string): boolean {
@@ -668,6 +681,20 @@ export function createGatewayHttpServer(opts: {
                 rateLimiter,
               },
             ),
+        });
+      }
+      if (isOpenManagerTriageWorkerReadinessPath(scopedRequestPath)) {
+        requestStages.push({
+          name: "openmanager-triage-worker-readiness",
+          run: async () =>
+            (
+              await getOpenManagerTriageWorkerReadinessHttpModule()
+            ).handleOpenManagerTriageWorkerReadinessHttpRequest(req, res, {
+              auth: resolvedAuthValue,
+              trustedProxies,
+              allowRealIpFallback,
+              rateLimiter,
+            }),
         });
       }
       if (isSessionKillPath(scopedRequestPath)) {
