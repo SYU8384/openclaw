@@ -5,7 +5,7 @@ import { handleOpenManagerTriageWorkerReadinessHttpRequest } from "./openmanager
 
 const hasAuth = vi.hoisted(() => vi.fn());
 
-vi.mock("../agents/model-auth.js", () => ({ hasRuntimeAvailableProviderAuth: hasAuth }));
+vi.mock("../agents/model-auth.js", () => ({ hasAvailableAuthForProvider: hasAuth }));
 vi.mock("./http-utils.js", () => ({
   authorizeScopedGatewayHttpRequestOrReply: vi.fn(async () => ({ cfg: {} })),
   resolveOpenAiCompatibleHttpOperatorScopes: vi.fn(),
@@ -42,7 +42,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  hasAuth.mockReset().mockImplementation(({ provider }) => provider === "minimax-portal");
+  hasAuth.mockReset().mockImplementation(async ({ provider }) => provider === "minimax-portal");
 });
 
 describe("OpenManager triage worker readiness HTTP", () => {

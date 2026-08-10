@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { hasRuntimeAvailableProviderAuth } from "../agents/model-auth.js";
+import { hasAvailableAuthForProvider } from "../agents/model-auth.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
 import { sendJson, sendMethodNotAllowed } from "./http-common.js";
@@ -52,14 +52,18 @@ export async function handleOpenManagerTriageWorkerReadinessHttpRequest(
   sendJson(res, 200, {
     ok: true,
     result: {
-      workers: workers.map((worker) => ({
-        workerId: worker.workerId,
-        ready: hasRuntimeAvailableProviderAuth({
-          provider: worker.provider,
-          cfg,
-          allowPluginSyntheticAuth: false,
-        }),
-      })),
+      workers: await Promise.all(
+        workers.map(async (worker) => ({
+          workerId: worker.workerId,
+          // Stored OAuth profiles are a first-class runtime credential. Use the
+          // same availability resolver as request dispatch, not the lightweight
+          // environment-only probe.
+          ready: await hasAvailableAuthForProvider({
+            provider: worker.provider,
+            cfg,
+          }),
+        })),
+      ),
     },
   });
   return true;
