@@ -268,6 +268,22 @@ describe("resolveDefaultTelegramAccountId", () => {
     );
   });
 
+  it("falls back to the configured default account without a default agent", () => {
+    const cfg: OpenClawConfig = {
+      agents: { list: [{ id: "hex" }, { id: "quill" }] },
+      channels: {
+        telegram: {
+          accounts: { default: { botToken: "tok-default" }, coding: { botToken: "tok-coding" } },
+        },
+      },
+      bindings: [
+        { agentId: "quill", match: { channel: "telegram", accountId: "default" } },
+        { agentId: "hex", match: { channel: "telegram", accountId: "coding" } },
+      ],
+    };
+
+    expect(resolveDefaultTelegramAccountId(cfg)).toBe("default");
+  });
   it("does not warn when accounts.default exists", () => {
     const cfg: OpenClawConfig = {
       channels: {
