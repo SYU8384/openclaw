@@ -372,8 +372,10 @@ export async function deliverReply(
     const isDurableProgressCommentary =
       turn.streamMode === "progress" &&
       info.kind === "block" &&
-      effectivePayload.isCommentary === true;
-    // CLI finals exclude separately classified commentary, so it must outlive the progress draft.
+      effectivePayload.isCommentary === true &&
+      turn.verboseProgressActive();
+    // Only verbose progress owns a durable commentary block. Otherwise it stays
+    // in the disposable draft and must not survive its collapse as a new bubble.
     const suppressProgressAnswerBlock =
       turn.streamMode === "progress" &&
       info.kind === "block" &&

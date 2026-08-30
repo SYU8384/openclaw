@@ -270,9 +270,10 @@ export async function runTelegramDispatchTurn(turn: Turn) {
             commentaryProgressEnabled:
               turn.streamMode === "progress" ? turn.commentaryProgressEnabled : undefined,
             progressPreambleEnabled: turn.progressPreambleEnabled,
-            commentaryPayloadsEnabled: turn.progressPreambleEnabled,
-            // Read the current getter after core freezes visibility so draft
-            // and durable commentary cannot both own the same preamble.
+            commentaryPayloadsEnabled:
+              turn.streamMode === "progress" ? turn.commentaryProgressEnabled : undefined,
+            // Regular commentary belongs only in the disposable progress draft.
+            // A durable verbose lane explicitly takes ownership, preventing duplicate bubbles.
             shouldDeliverCommentaryPayloads:
               turn.streamMode === "progress" && turn.commentaryProgressEnabled
                 ? () => turn.verboseProgressActive()
