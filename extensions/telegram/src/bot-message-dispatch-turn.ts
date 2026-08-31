@@ -265,6 +265,12 @@ export async function runTelegramDispatchTurn(turn: Turn) {
               turn.streamMode === "progress" ? turn.commentaryProgressEnabled : undefined,
             progressPreambleEnabled: turn.progressPreambleEnabled,
             commentaryPayloadsEnabled: turn.progressPreambleEnabled,
+            // The draft can own commentary only when its opt-in is enabled.
+            // Otherwise CLI commentary must remain durable instead of being dropped.
+            shouldDeliverCommentaryPayloads:
+              turn.streamMode === "progress" && turn.commentaryProgressEnabled
+                ? () => turn.verboseProgressActive()
+                : undefined,
             reasoningPayloadsEnabled: turn.durableReasoningPayloadsEnabled,
             onToolStart: (payload) => handleToolStart(turn, payload),
             onItemEvent: (payload) => handleItemEvent(turn, payload),

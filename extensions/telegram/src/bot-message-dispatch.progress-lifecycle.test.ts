@@ -132,8 +132,39 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
     expectWindowRetiredAfterFinal(answerDraftStream, deliverReplies);
   });
 
-  it("keeps CLI pre-tool commentary after the progress window retires", async () => {
+  it("keeps ordinary CLI pre-tool commentary in the temporary progress window", async () => {
     const markers = "Test markers: caribou-lampion-473, fromage-quantique, satellite-en-tricot";
+    const { answerDraftStream } = setupDraftStreams({ answerMessageId: 2001 });
+    dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
+      async ({ dispatcherOptions, replyOptions }) => {
+        expect(replyOptions?.commentaryPayloadsEnabled).toBe(true);
+        expect(replyOptions?.shouldDeliverCommentaryPayloads?.()).toBe(false);
+        await replyOptions?.onItemEvent?.({
+          kind: "preamble",
+          itemId: "commentary-1",
+          progressText: markers,
+          suppressDurableProgress: true,
+        });
+        await replyOptions?.onBlockReplyQueued?.({ text: markers, isCommentary: true });
+        await dispatcherOptions.deliver({ text: markers, isCommentary: true }, { kind: "block" });
+        await replyOptions?.onToolStart?.({ name: "Bash", phase: "start" });
+        await dispatcherOptions.deliver({ text: "TEST DONE" }, { kind: "final" });
+        return { queuedFinal: true };
+      },
+    );
+    await dispatchWithContext({
+      context: createContext(),
+      streamMode: "progress",
+      telegramCfg: { streaming: { mode: "progress", progress: { commentary: true } } },
+    });
+    expect(answerDraftStream.updatePreview).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining(markers) }),
+    );
+    expect(allDeliveredReplyTexts()).toEqual(["TEST DONE"]);
+  });
+
+  it("keeps CLI pre-tool commentary durable when draft commentary is disabled", async () => {
+    const markers = "Durable markers: saffron-penguin-194, velvet-cedar, quartz-harbor";
     setupDraftStreams({ answerMessageId: 2001 });
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
       async ({ dispatcherOptions, replyOptions }) => {
@@ -159,6 +190,33 @@ describeTelegramDispatch("dispatchTelegramMessage progress-lifecycle", () => {
       telegramCfg: { streaming: { mode: "progress" } },
     });
 
+    expect(allDeliveredReplyTexts()).toEqual([markers, "TEST DONE"]);
+  });
+
+  it("persists CLI pre-tool commentary when verbose progress owns the durable lane", async () => {
+    const markers = "Verbose markers: lantern-otter-582, compass-velvet, cloud-atelier";
+    setupDraftStreams({ answerMessageId: 2001 });
+    dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
+      async ({ dispatcherOptions, replyOptions }) => {
+        replyOptions?.onVerboseProgressVisibility?.(() => true);
+        expect(replyOptions?.shouldDeliverCommentaryPayloads?.()).toBe(true);
+        await replyOptions?.onItemEvent?.({
+          kind: "preamble",
+          itemId: "commentary-1",
+          progressText: markers,
+          suppressDurableProgress: true,
+        });
+        await replyOptions?.onBlockReplyQueued?.({ text: markers, isCommentary: true });
+        await dispatcherOptions.deliver({ text: markers, isCommentary: true }, { kind: "block" });
+        await dispatcherOptions.deliver({ text: "TEST DONE" }, { kind: "final" });
+        return { queuedFinal: true };
+      },
+    );
+    await dispatchWithContext({
+      context: createContext(),
+      streamMode: "progress",
+      telegramCfg: { streaming: { mode: "progress", progress: { commentary: true } } },
+    });
     expect(allDeliveredReplyTexts()).toEqual([markers, "TEST DONE"]);
   });
 

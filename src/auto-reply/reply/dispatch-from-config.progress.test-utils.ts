@@ -181,6 +181,40 @@ describe("dispatchReplyFromConfig", () => {
     },
   );
 
+  it("keeps commentary durable when a channel registers no draft owner", async () => {
+    setNoAbort();
+    const dispatcher = createDispatcher();
+    const ctx = buildTestCtx({
+      Provider: "telegram",
+      Surface: "telegram",
+      ChatType: "group",
+      From: "telegram:group:-100123",
+      SessionKey: "agent:main:telegram:group:-100123",
+    });
+
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg: automaticGroupReplyConfig,
+      dispatcher,
+      replyResolver: async (_ctx, opts) => {
+        expect(opts?.commentaryPayloadsEnabled).toBe(true);
+        expect(opts?.shouldDeliverCommentaryPayloads).toBeUndefined();
+        await opts?.onBlockReply?.({
+          text: "Inspecting the dispatch path.",
+          isCommentary: true,
+        });
+        return { text: "Done." } satisfies ReplyPayload;
+      },
+      replyOptions: { commentaryPayloadsEnabled: true },
+    });
+
+    expect(dispatcher.sendBlockReply).toHaveBeenCalledExactlyOnceWith({
+      text: "Inspecting the dispatch path.",
+      isCommentary: true,
+    });
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledExactlyOnceWith({ text: "Done." });
+  });
+
   it("forwards channel-owned group progress callbacks while source delivery is suppressed", async () => {
     setNoAbort();
     sessionStoreMocks.currentEntry = {
