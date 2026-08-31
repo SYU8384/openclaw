@@ -373,9 +373,9 @@ export async function deliverReply(
       turn.streamMode === "progress" &&
       info.kind === "block" &&
       effectivePayload.isCommentary === true &&
-      turn.verboseProgressActive();
-    // Only verbose progress owns a durable commentary block. Otherwise it stays
-    // in the disposable draft and must not survive its collapse as a new bubble.
+      (!turn.commentaryProgressEnabled || turn.verboseProgressActive());
+    // When draft commentary is disabled, no draft can own the block.
+    // Otherwise only verbose progress owns durable commentary.
     const suppressProgressAnswerBlock =
       turn.streamMode === "progress" &&
       info.kind === "block" &&

@@ -268,6 +268,21 @@ With the commentary lane enabled, preambles render only as those interleaved
 💬 lines; the status headline below stays out of the way so the lane keeps its
 documented shape.
 
+### Telegram commentary delivery
+
+Telegram uses the same shared setting, but it also preserves the existing
+durable CLI-commentary path when the draft lane is off:
+
+| `streaming.progress.commentary` | Session verbose level | Where completed CLI commentary appears                                  |
+| ------------------------------- | --------------------- | ----------------------------------------------------------------------- |
+| `false` (default)               | `off`                 | Durable Telegram message; the draft can still show its status headline. |
+| `true`                          | `off`                 | Temporary interleaved commentary line in the progress draft.            |
+| `true`                          | `on` or `full`        | Durable Telegram message owned by verbose progress.                     |
+
+Set the draft lane in configuration and use `/verbose on`, `/verbose full`, or
+`/verbose off` in a chat to change that session's verbose level. To set the
+default for new sessions, configure `agents.defaults.verboseDefault`.
+
 ### Status headline
 
 On Discord and Telegram in progress mode, the model's typed pre-tool preamble
