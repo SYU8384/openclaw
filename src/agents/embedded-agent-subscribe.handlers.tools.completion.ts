@@ -3,7 +3,6 @@ import {
   HEARTBEAT_RESPONSE_TOOL_NAME,
   normalizeHeartbeatToolResponse,
 } from "../auto-reply/heartbeat-tool-response.js";
-import { parseSessionThreadInfoFast } from "../config/sessions/thread-info.js";
 import {
   emitAgentActivityEvent,
   type AgentCommandOutputEventData,
@@ -185,6 +184,13 @@ export async function handleToolExecutionEnd(
   const meta = callSummary.meta;
   const asyncStarted = !isToolError && isAsyncStartedToolResult(sanitizedResult);
   const asyncTaskIds = asyncStarted ? readAsyncStartedTaskIds(sanitizedResult) : {};
+  // A Code Mode exec that returns "waiting" parked a run the model resumes via
+  // `wait`; record that here so recovery can tell parked nested work apart
+  // from any other still-active lifecycle item.
+  const codeModeSuspended =
+    !isToolError &&
+    ctx.params.codeModeExecToolNames?.has(toolName) === true &&
+    readToolResultDetails(sanitizedResult)?.status === "waiting";
   const terminate =
     result !== null &&
     typeof result === "object" &&
@@ -198,6 +204,7 @@ export async function handleToolExecutionEnd(
     isError: observerIsError,
     ...(terminate ? { terminate: true } : {}),
     ...(asyncStarted ? { asyncStarted: true, ...asyncTaskIds } : {}),
+    ...(codeModeSuspended ? { codeModeSuspended: true } : {}),
   });
   const acceptedSessionSpawn =
     toolName === "sessions_spawn" && !isToolError
@@ -227,6 +234,7 @@ export async function handleToolExecutionEnd(
     arguments: startArgs,
     ...(meta ? { meta } : {}),
     executionStarted,
+    replaySafe: callSummary.replaySafe,
     outcome: isToolError ? "failure" : "success",
     ...(callSummary.ownerKey
       ? {
@@ -270,6 +278,9 @@ export async function handleToolExecutionEnd(
   const messageDelivery = readEmbeddedMessageDeliveryFact(
     readToolResultDetails(toolSendReceiptResult)?.messageDelivery,
   );
+  if (messageDelivery?.sourceReplyDelivered) {
+    ctx.state.sourceReplyDelivered = true;
+  }
   const didDeliverMessagingResult =
     isMessagingInvocation &&
     (messageDelivery
@@ -290,8 +301,7 @@ export async function handleToolExecutionEnd(
         config: ctx.params.config,
         currentChannelId: ctx.params.currentChannelId,
         currentMessagingTarget: ctx.params.currentMessagingTarget,
-        currentThreadId:
-          ctx.params.currentThreadId ?? parseSessionThreadInfoFast(ctx.params.sessionKey).threadId,
+        currentThreadId: ctx.params.currentThreadId,
         currentMessageId: ctx.params.currentMessageId,
         replyToMode: ctx.params.replyToMode,
         hasRepliedRef: startData?.hasRepliedRef,
@@ -311,6 +321,7 @@ export async function handleToolExecutionEnd(
       toolName,
       args: startArgs,
       result,
+      hookResult: toolSendReceiptResult,
       isError: isToolError,
       allowExplicitSourceRoute: isDeliveredMessagingToolSendToCurrentSource({
         send: confirmedMessageTarget,
@@ -319,8 +330,7 @@ export async function handleToolExecutionEnd(
         currentAccountId: ctx.params.currentAccountId,
         currentChannelId: ctx.params.currentChannelId,
         currentMessagingTarget: ctx.params.currentMessagingTarget,
-        currentThreadId:
-          ctx.params.currentThreadId ?? parseSessionThreadInfoFast(ctx.params.sessionKey).threadId,
+        currentThreadId: ctx.params.currentThreadId,
         sessionKey: ctx.params.sessionKey,
         deliveredPayload: extractionResult,
       }),
@@ -459,9 +469,7 @@ export async function handleToolExecutionEnd(
     ...(callSummary.commandBearing && !isExecToolName(toolName)
       ? { suppressChannelProgress: true }
       : {}),
-    ...(isToolError && extractToolErrorMessage(sanitizedResult)
-      ? { error: extractToolErrorMessage(sanitizedResult) }
-      : {}),
+    ...(errorMessage ? { error: errorMessage } : {}),
   };
   emitTrackedItemEvent(ctx, itemData);
   emitAgentEventCallbackBestEffort(ctx, {
@@ -556,9 +564,7 @@ export async function handleToolExecutionEnd(
         startedAt: startData?.startTime,
         endedAt,
         ...(output ? { summary: output } : {}),
-        ...(isToolError && extractToolErrorMessage(sanitizedResult)
-          ? { error: extractToolErrorMessage(sanitizedResult) }
-          : {}),
+        ...(errorMessage ? { error: errorMessage } : {}),
       });
       const outputData: AgentCommandOutputEventData = {
         itemId: commandItemId,
@@ -710,5 +716,6 @@ export async function handleToolExecutionEnd(
         ctx.log.warn(`after_tool_call hook failed: tool=${toolName} error=${String(err)}`);
       });
   }
-  return { executionStarted: terminal.executionStarted };
+  terminal.executedArguments ??= startArgs;
+  return Object.assign(terminal, { isError: observerIsError });
 }

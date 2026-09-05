@@ -3,22 +3,8 @@ import {
   resolveNonNegativeIntegerOption,
   resolveOptionalIntegerOption,
 } from "@openclaw/normalization-core/number-coercion";
-import type { InboundDebounceByProvider } from "../config/types.messages.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { toErrorObject } from "../infra/errors.js";
-
-const resolveMs = (value: unknown): number | undefined =>
-  resolveOptionalIntegerOption(value, { min: 0 });
-
-const resolveChannelOverride = (params: {
-  byChannel?: InboundDebounceByProvider;
-  channel: string;
-}): number | undefined => {
-  if (!params.byChannel) {
-    return undefined;
-  }
-  return resolveMs(params.byChannel[params.channel]);
-};
 
 /** Resolve effective inbound debounce milliseconds from explicit, channel, and global config. */
 export function resolveInboundDebounceMs(params: {
@@ -27,13 +13,17 @@ export function resolveInboundDebounceMs(params: {
   overrideMs?: number;
 }): number {
   const inbound = params.cfg.messages?.inbound;
-  const override = resolveMs(params.overrideMs);
-  const byChannel = resolveChannelOverride({
-    byChannel: inbound?.byChannel,
-    channel: params.channel,
-  });
-  const base = resolveMs(inbound?.debounceMs);
-  return override ?? byChannel ?? base ?? 0;
+  for (const value of [
+    params.overrideMs,
+    inbound?.byChannel?.[params.channel],
+    inbound?.debounceMs,
+  ]) {
+    const resolved = resolveOptionalIntegerOption(value, { min: 0 });
+    if (resolved !== undefined) {
+      return resolved;
+    }
+  }
+  return 0;
 }
 
 type DebounceBuffer<T> = {
@@ -56,6 +46,7 @@ type InboundDebounceAdmissionLifecycleInput = {
   abortSignal?: AbortSignal;
   onAdopted?: () => void | Promise<void>;
   onDeferred?: () => boolean | void;
+  onDeferredHeartbeat?: () => void;
   onAdoptionFinalizing?: () => void;
   onFailed?: (error: unknown) => void | Promise<void>;
   onAbandoned?: () => void | Promise<void>;
@@ -66,6 +57,7 @@ type InboundDebounceAdmissionLifecycle = {
   abortSignal: AbortSignal;
   onAdopted: () => Promise<void>;
   onDeferred: () => boolean | void;
+  onDeferredHeartbeat?: () => void;
   onAdoptionFinalizing: () => void;
   onFailed?: (error: unknown) => Promise<void>;
   onAbandoned: () => Promise<void>;
@@ -105,6 +97,7 @@ function createInboundDebounceFlush(params: {
       }
       return accepted;
     },
+    onDeferredHeartbeat: () => source?.onDeferredHeartbeat?.(),
     onAdoptionFinalizing: () => source?.onAdoptionFinalizing?.(),
     onFailed: source?.onFailed
       ? async (error) => {

@@ -177,9 +177,7 @@ const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
     // Claude classifiers may refuse after partial output. Hold every event until
     // messageStop proves the response is safe to expose.
     const refusalBuffer = usesClaudeStreamingRefusalBedrockContract(model)
-      ? createDeferredEventBuffer<AssistantMessageEvent>(stream, () =>
-          notifyLlmRequestActivity(options.signal),
-        )
+      ? createDeferredEventBuffer<AssistantMessageEvent>(stream)
       : undefined;
     const eventSink = refusalBuffer ?? stream;
 
@@ -308,6 +306,7 @@ const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 
       let sawMessageStop = false;
       for await (const item of { [Symbol.asyncIterator]: () => responseIterator }) {
+        notifyLlmRequestActivity(options.signal);
         if (item.messageStart) {
           if (item.messageStart.role !== ConversationRole.ASSISTANT) {
             throw new Error(
@@ -478,7 +477,7 @@ function resolveSimpleBedrockOptions(
         : undefined;
     return {
       ...base,
-      ...(reasoning !== undefined
+      ...(reasoning !== undefined || supportsAdaptiveThinking(model)
         ? { maxTokens: resolveAdaptiveBedrockMaxTokens(model, base.maxTokens) }
         : {}),
       reasoning,
@@ -486,7 +485,13 @@ function resolveSimpleBedrockOptions(
   }
 
   if (options.reasoning === "off") {
-    return { ...base, reasoning: "off" } satisfies BedrockOptions;
+    return {
+      ...base,
+      ...(supportsAdaptiveThinking(model)
+        ? { maxTokens: resolveAdaptiveBedrockMaxTokens(model, base.maxTokens) }
+        : {}),
+      reasoning: "off",
+    } satisfies BedrockOptions;
   }
 
   if (isAnthropicClaudeModel(model)) {
