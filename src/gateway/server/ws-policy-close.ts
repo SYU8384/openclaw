@@ -20,7 +20,7 @@ const policyMethods = new Set([
 ]);
 type PolicyResponse = {
   readonly pending: boolean;
-  settled: Promise<void>;
+  readonly settled: Promise<void>;
   hold: () => void;
   finish: () => void;
 };
@@ -77,10 +77,10 @@ export function registerGatewayPolicyResponse(
 /** Claim only at the mutation owner, after request validation and before publication can revoke it. */
 export function holdGatewayPolicyResponse(
   respond: RespondFn | undefined,
-): Promise<void> | undefined {
+): Pick<PolicyResponse, "settled"> | undefined {
   const response = respond ? responses.get(respond) : undefined;
   response?.hold();
-  return response?.settled;
+  return response;
 }
 
 /** Fence authority immediately; only already accepted policy writers may send their final result. */
