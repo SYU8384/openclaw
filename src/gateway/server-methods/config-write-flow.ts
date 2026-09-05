@@ -246,7 +246,7 @@ export async function commitGatewayConfigWrite(params: {
   application?: Promise<RuntimeConfigWriteApplicationStatus>;
   queueFollowUp: () => void;
 }> {
-  const responseSettled = holdGatewayPolicyResponse(params.respond);
+  const responseSettled = holdGatewayPolicyResponse(params.respond)?.settled;
   const application = params.awaitRuntimeApplication
     ? createRuntimeConfigWriteApplication(
         captureGatewayRootWorkAdmissionContinuationScope()?.run,

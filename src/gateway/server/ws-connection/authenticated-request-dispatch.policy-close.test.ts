@@ -106,7 +106,7 @@ describe("policy writer response ownership", () => {
       runtime.handler.mockImplementation(async ({ req, respond }) => {
         const writer = writers.find(({ id }) => id === req.id);
         if (writer) {
-          void holdGatewayPolicyResponse(respond)?.then(settled);
+          void holdGatewayPolicyResponse(respond)?.settled.then(settled);
           writer.started.resolve();
           await writer.release.promise;
           respond(true, { committed: req.id });
@@ -228,7 +228,7 @@ describe("policy writer response ownership", () => {
       const fixture = createFixture();
       const settled = vi.fn();
       runtime.handler.mockImplementation(async ({ respond }) => {
-        void holdGatewayPolicyResponse(respond)?.then(settled);
+        void holdGatewayPolicyResponse(respond)?.settled.then(settled);
         disconnectAllSharedGatewayAuthClients([fixture.client]);
         if (completion === "throw") {
           throw new Error("write failed");
