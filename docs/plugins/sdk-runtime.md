@@ -687,3 +687,18 @@ Beyond `api.runtime`, the API object also provides:
 - [Plugin internals](/plugins/architecture) — capability model and registry
 - [SDK entry points](/plugins/sdk-entrypoints) — `definePluginEntry` options
 - [SDK overview](/plugins/sdk-overview) — subpath reference
+
+## Managed model connections
+
+`createModelConnectionsHttpHandler(pathPrefix)` from `openclaw/plugin-sdk/gateway-method-runtime`
+provides a lazy model administration handler for a gateway-authenticated plugin route.
+The plugin must declare the authenticated gateway method-dispatch contract. The handler
+also enforces configuration scope, bounds request size, and never returns saved credentials.
+The admin HTTP RPC plugin registers this capability; core gateway startup does not install
+an unconditional model-administration route.
+
+Connection revisions live in the shared SQLite state database. Protected auth profiles
+hold immutable credentials, while connection records contain references only. Configuration
+uses compare-and-swap, so a stale operation cannot overwrite another applied revision.
+Synthetic tests verify actual model identity and structured output. The caller explicitly
+pins a connection revision and manages activation and workflow alternatives.

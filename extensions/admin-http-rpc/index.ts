@@ -2,6 +2,7 @@
  * Admin HTTP RPC plugin entry. It exposes a trusted gateway-authenticated HTTP
  * endpoint for the explicit admin method allowlist.
  */
+import { createModelConnectionsHttpHandler } from "openclaw/plugin-sdk/gateway-method-runtime";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { handleAdminHttpRpcRequest } from "./src/handler.js";
 
@@ -10,6 +11,13 @@ export default definePluginEntry({
   name: "Admin HTTP RPC",
   description: "Expose selected Gateway admin RPC methods over HTTP",
   register(api) {
+    api.registerHttpRoute({
+      path: "/api/v1/admin/model-connections/",
+      auth: "gateway",
+      match: "prefix",
+      gatewayRuntimeScopeSurface: "trusted-operator",
+      handler: createModelConnectionsHttpHandler("/api/v1/admin/model-connections/"),
+    });
     api.registerHttpRoute({
       path: "/api/v1/admin/rpc",
       auth: "gateway",

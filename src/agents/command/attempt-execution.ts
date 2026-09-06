@@ -97,9 +97,7 @@ const ACP_TRANSCRIPT_USAGE = {
 const GOOGLE_GEMINI_CLI_PROVIDER_ID = "google-gemini-cli";
 const GOOGLE_PROVIDER_ID = "google";
 
-function shouldSuppressEmbeddedLiveStreamOutput(params: {
-  opts: AgentCommandOpts;
-}): boolean {
+function shouldSuppressEmbeddedLiveStreamOutput(params: { opts: AgentCommandOpts }): boolean {
   return params.opts.sessionEffects === "internal" && params.opts.deliver !== true;
 }
 
@@ -573,8 +571,11 @@ export function runAgentAttempt(params: {
     workspaceDir: params.workspaceDir,
     provider: params.providerOverride,
     authProfileProvider: params.authProfileProvider,
-    sessionAuthProfileId: params.sessionEntry?.authProfileOverride,
-    sessionAuthProfileSource: params.sessionEntry?.authProfileOverrideSource,
+    sessionAuthProfileId:
+      params.opts.pinnedAuthProfileId ?? params.sessionEntry?.authProfileOverride,
+    sessionAuthProfileSource: params.opts.pinnedAuthProfileId
+      ? "user"
+      : params.sessionEntry?.authProfileOverrideSource,
     harnessId: requestedAgentHarnessId,
     harnessRuntime: agentHarnessPolicy.runtime,
     ...(params.metadataSnapshot ? { metadataSnapshot: params.metadataSnapshot } : {}),

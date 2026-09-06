@@ -14,7 +14,7 @@ describe("admin-http-rpc plugin entry", () => {
     });
   });
 
-  it("registers one trusted gateway HTTP route", () => {
+  it("registers trusted gateway RPC and model administration routes", () => {
     const routes: Array<Record<string, unknown>> = [];
     plugin.register({
       registerHttpRoute(route) {
@@ -22,8 +22,13 @@ describe("admin-http-rpc plugin entry", () => {
       },
     } as Parameters<typeof plugin.register>[0]);
 
-    expect(routes).toHaveLength(1);
+    expect(routes).toHaveLength(2);
     expect(routes[0]).toMatchObject({
+      path: "/api/v1/admin/model-connections/",
+      auth: "gateway",
+      match: "prefix",
+    });
+    expect(routes[1]).toMatchObject({
       path: "/api/v1/admin/rpc",
       auth: "gateway",
       match: "exact",

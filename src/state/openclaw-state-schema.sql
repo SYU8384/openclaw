@@ -1224,3 +1224,9 @@ CREATE TABLE IF NOT EXISTS backup_runs (
 
 CREATE INDEX IF NOT EXISTS idx_backup_runs_created
   ON backup_runs(created_at DESC, id);
+
+-- Generic managed model connection revisions; protected credentials remain in auth profiles.
+CREATE TABLE IF NOT EXISTS managed_model_connections (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  payload_json TEXT NOT NULL
+);

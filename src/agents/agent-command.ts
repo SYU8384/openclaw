@@ -1827,17 +1827,19 @@ async function agentCommandInternal(
     for (;;) {
       try {
         const spawnedBy = normalizedSpawned.spawnedBy ?? sessionEntry?.spawnedBy;
-        const effectiveFallbacksOverride = resolveEffectiveModelFallbacks({
-          cfg,
-          agentId: sessionAgentId,
-          sessionKey,
-          hasSessionModelOverride:
-            hasExplicitRunOverride || Boolean(storedProviderOverride || storedModelOverride),
-          modelOverrideSource: hasExplicitRunOverride ? "user" : storedModelOverrideSource,
-          hasAutoFallbackProvenance: hasExplicitRunOverride
-            ? false
-            : hasStoredAutoFallbackProvenance,
-        });
+        const effectiveFallbacksOverride = opts.disableModelFallback
+          ? []
+          : resolveEffectiveModelFallbacks({
+              cfg,
+              agentId: sessionAgentId,
+              sessionKey,
+              hasSessionModelOverride:
+                hasExplicitRunOverride || Boolean(storedProviderOverride || storedModelOverride),
+              modelOverrideSource: hasExplicitRunOverride ? "user" : storedModelOverrideSource,
+              hasAutoFallbackProvenance: hasExplicitRunOverride
+                ? false
+                : hasStoredAutoFallbackProvenance,
+            });
 
         let fallbackAttemptIndex = 0;
         attemptLifecycleState.currentTurnUserMessagePersisted = false;
@@ -2093,6 +2095,8 @@ async function agentCommandInternal(
               { cause: err },
             );
           }
+          if (opts.disableModelFallback)
+            throw new Error("Model switching is controlled by the external request router.");
           const previousProvider = provider;
           const previousModel = model;
           if (autoFallbackPrimaryProbe) {

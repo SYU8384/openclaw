@@ -63,3 +63,28 @@ export async function dispatchGatewayMethod(
     ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
 }
+
+/** Create a lazy, configuration-scoped model administration handler for an authenticated plugin route. */
+export function createModelConnectionsHttpHandler(pathPrefix: string) {
+  return async (
+    req: import("node:http").IncomingMessage,
+    res: import("node:http").ServerResponse,
+  ): Promise<boolean> => {
+    const scope = getPluginRuntimeGatewayRequestScope();
+    if (scope?.gatewayMethodDispatchAllowed !== true)
+      throw new Error("Model administration requires an authenticated gateway plugin scope.");
+    const [{ handleModelConnectionsHttpRequest }, { getRuntimeConfig }, { resolveGatewayAuth }] =
+      await Promise.all([
+        import("../gateway/model-connections-http.js"),
+        import("../config/config.js"),
+        import("../gateway/auth.js"),
+      ]);
+    const cfg = getRuntimeConfig();
+    return handleModelConnectionsHttpRequest(req, res, {
+      pathPrefix,
+      auth: resolveGatewayAuth({ authConfig: cfg.gateway?.auth }),
+      trustedProxies: cfg.gateway?.trustedProxies,
+      allowRealIpFallback: cfg.gateway?.allowRealIpFallback,
+    });
+  };
+}

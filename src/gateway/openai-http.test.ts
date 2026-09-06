@@ -25,6 +25,13 @@ import {
   withGatewayServer,
 } from "./test-helpers.js";
 
+vi.mock("./model-connections.js", () => ({
+  resolveLlmConnection: vi.fn(async () => ({
+    model: "openai/gpt-5.4",
+    profileId: "managed-fixture",
+  })),
+}));
+
 installGatewayTestHooks({ scope: "suite" });
 
 let startGatewayServer: typeof import("./server.js").startGatewayServer;
@@ -368,6 +375,29 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         expect(res.status).toBe(200);
         expect(firstAgentCommandOptions()?.model).toBe("gpt-5.4");
         await res.text();
+        agentCommand.mockClear();
+        agentCommand.mockResolvedValueOnce({
+          payloads: [{ text: "hello" }],
+          meta: { agentMeta: { provider: "openai", model: "gpt-5.4" } },
+        });
+        const managed = await postChatCompletions(
+          port,
+          { model: "openclaw", messages: [{ role: "user", content: "hi" }] },
+          {
+            "x-openclaw-model": "gpt-5.4",
+            "x-openclaw-connection": "fixture",
+            "x-openclaw-connection-version": "1",
+            "x-openclaw-scopes": "operator.admin, operator.write",
+          },
+        );
+        expect(managed.status).toBe(200);
+        expect(managed.headers.get("x-openclaw-actual-model")).toBe("openai/gpt-5.4");
+        expect(agentCommand.mock.calls[0]?.[0]).toMatchObject({
+          model: "openai/gpt-5.4",
+          pinnedAuthProfileId: "managed-fixture",
+          disableModelFallback: true,
+        });
+        await managed.text();
         await writeGatewayConfig({});
       }
 

@@ -67,6 +67,10 @@ export type AgentCommandOpts = {
   agentId?: string;
   /** Per-run provider override. */
   provider?: string;
+  /** Trusted, request-only credential selection; never persisted to the session. */
+  pinnedAuthProfileId?: string;
+  /** External orchestrator owns alternatives for this request. */
+  disableModelFallback?: boolean;
   /** Per-run model override. */
   model?: string;
   to?: string;

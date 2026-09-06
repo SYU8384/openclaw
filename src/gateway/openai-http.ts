@@ -64,6 +64,7 @@ import {
   resolveOpenAiCompatibleHttpOperatorScopes,
 } from "./http-utils.js";
 import { normalizeInputHostnameAllowlist } from "./input-allowlist.js";
+import { classifyManagedLlmError, managedLlmResultIdentity } from "./managed-model-result.js";
 import { resolveOpenAiCompatError, validateOpenAiSamplingParams } from "./openai-compat-errors.js";
 import {
   isToolChoiceConstraintSatisfied,
@@ -161,6 +162,8 @@ function buildAgentCommandInput(params: {
   prompt: { message: string; extraSystemPrompt?: string; images?: ImageContent[] };
   clientTools?: ClientToolDefinition[];
   modelOverride?: string;
+  pinnedAuthProfileId?: string;
+  disableModelFallback?: boolean;
   sessionKey: string;
   runId: string;
   messageChannel: string;
@@ -173,6 +176,8 @@ function buildAgentCommandInput(params: {
     images: params.prompt.images,
     clientTools: params.clientTools,
     model: params.modelOverride,
+    pinnedAuthProfileId: params.pinnedAuthProfileId,
+    disableModelFallback: params.disableModelFallback,
     sessionKey: params.sessionKey,
     runId: params.runId,
     deliver: false as const,
@@ -1064,6 +1069,49 @@ export async function handleOpenAiHttpRequest(
   const mergedExtraSystemPrompt = [prompt.extraSystemPrompt, toolChoicePrompt]
     .filter((part): part is string => Boolean(part))
     .join("\n\n");
+  let pinnedAuthProfileId: string | undefined;
+  let selectedModelOverride = modelOverride;
+  const connectionId = req.headers["x-openclaw-connection"];
+  if (connectionId !== undefined) {
+    if (stream) {
+      sendJson(res, 400, {
+        error: {
+          message: "Managed connections require non-streaming requests.",
+          before_inference: true,
+        },
+      });
+      return true;
+    }
+    if (typeof connectionId !== "string" || !modelOverride) {
+      sendJson(res, 400, {
+        error: { message: "Connection requires an authorized model override." },
+      });
+      return true;
+    }
+    try {
+      const { resolveLlmConnection } = await import("./model-connections.js");
+      const { getRuntimeConfig } = await import("../config/config.js");
+      const version = Number(req.headers["x-openclaw-connection-version"]);
+      if (!Number.isInteger(version) || version < 1) throw new Error("Invalid version.");
+      const selected = await resolveLlmConnection(
+        getRuntimeConfig(),
+        connectionId,
+        modelOverride,
+        version,
+      );
+      pinnedAuthProfileId = selected.profileId;
+      selectedModelOverride = selected.model;
+    } catch (error) {
+      sendJson(res, 503, {
+        error: {
+          message: "Selected connection is unavailable or changed.",
+          code: classifyManagedLlmError(error),
+          before_inference: true,
+        },
+      });
+      return true;
+    }
+  }
   const commandInput = buildAgentCommandInput({
     prompt: {
       message: prompt.message,
@@ -1071,7 +1119,9 @@ export async function handleOpenAiHttpRequest(
       images: images.length > 0 ? images : undefined,
     },
     clientTools: resolvedClientTools.length > 0 ? resolvedClientTools : undefined,
-    modelOverride,
+    modelOverride: selectedModelOverride,
+    pinnedAuthProfileId,
+    disableModelFallback: connectionId !== undefined,
     sessionKey,
     runId,
     messageChannel,
@@ -1088,6 +1138,30 @@ export async function handleOpenAiHttpRequest(
         return true;
       }
 
+      if (connectionId !== undefined) {
+        const identity = managedLlmResultIdentity(result);
+        if (identity.error) {
+          sendJson(res, 502, {
+            error: {
+              message: "Selected model request failed.",
+              code: identity.error,
+              type: "api_error",
+            },
+          });
+          return true;
+        }
+        if (!identity.model || identity.model !== selectedModelOverride) {
+          sendJson(res, 502, {
+            error: {
+              message: "Selected model identity changed.",
+              code: "invalid_output",
+              type: "api_error",
+            },
+          });
+          return true;
+        }
+        res.setHeader("x-openclaw-actual-model", identity.model);
+      }
       const usage = resolveChatCompletionUsage(result);
       const meta = (result as { meta?: unknown } | null)?.meta;
       const { stopReason, pendingToolCalls } = resolveStopReasonAndPendingToolCalls(meta);
@@ -1155,6 +1229,17 @@ export async function handleOpenAiHttpRequest(
       });
     } catch (err) {
       if (abortController.signal.aborted) {
+        return true;
+      }
+      if (connectionId !== undefined) {
+        logWarn("openai-compat: selected connection request failed");
+        sendJson(res, 502, {
+          error: {
+            message: "Selected model request failed.",
+            code: classifyManagedLlmError(err),
+            type: "api_error",
+          },
+        });
         return true;
       }
       logWarn(`openai-compat: chat completion failed: ${String(err)}`);

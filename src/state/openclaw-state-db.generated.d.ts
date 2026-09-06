@@ -563,6 +563,11 @@ export interface MacosPortGuardianRecords {
   timestamp: number;
 }
 
+export interface ManagedModelConnections {
+  id: Generated<number>;
+  payload_json: string;
+}
+
 export interface ManagedOutgoingImageRecords {
   alt: string;
   attachment_id: string;
@@ -991,6 +996,7 @@ export interface DB {
   gateway_restart_sentinel: GatewayRestartSentinel;
   installed_plugin_index: InstalledPluginIndex;
   macos_port_guardian_records: MacosPortGuardianRecords;
+  managed_model_connections: ManagedModelConnections;
   managed_outgoing_image_records: ManagedOutgoingImageRecords;
   media_blobs: MediaBlobs;
   migration_runs: MigrationRuns;
