@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { resolveDefaultAgentDir } from "../agents/agent-scope.js";
 import {
   ensureAuthProfileStore,
   resolveApiKeyForProfile,
@@ -83,8 +84,44 @@ async function updateRegistry<T>(mutate: (registry: Registry) => Promise<T>): Pr
 }
 const stableId = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 32);
 
+function configuredProviderIds(cfg: OpenClawConfig): Set<string> {
+  const model = cfg.agents?.defaults?.model;
+  const refs = [
+    ...Object.keys(cfg.agents?.defaults?.models ?? {}),
+    typeof model === "string" ? model : (model?.primary ?? ""),
+  ];
+  return new Set([
+    ...Object.keys(cfg.models?.providers ?? {}),
+    ...refs.filter((ref) => ref.includes("/")).map((ref) => ref.split("/")[0]),
+  ]);
+}
+
+async function connectionCatalog(cfg: OpenClawConfig) {
+  const catalog = [...(await loadModelCatalog({ config: cfg }))];
+  const missing = [...configuredProviderIds(cfg)].filter(
+    (id) => !catalog.some((m) => m.provider === id),
+  );
+  if (missing.length) {
+    const { resolveImplicitProviders } =
+      await import("../agents/models-config.providers.implicit.js");
+    const providers = await resolveImplicitProviders({
+      config: cfg,
+      agentDir: resolveDefaultAgentDir(cfg),
+      providerDiscoveryProviderIds: missing,
+      providerDiscoveryEntriesOnly: true,
+    });
+    for (const [provider, config] of Object.entries(providers ?? {})) {
+      for (const model of config.models ?? []) {
+        if (!catalog.some((m) => m.provider === provider && m.id === model.id))
+          catalog.push({ id: model.id, name: model.name, provider, input: model.input });
+      }
+    }
+  }
+  return catalog;
+}
+
 export async function llmInventory(cfg: OpenClawConfig) {
-  const catalog = await loadModelCatalog({ config: cfg });
+  const catalog = await connectionCatalog(cfg);
   const providerIds = [...new Set(catalog.map((m) => m.provider))].sort();
   const store = ensureAuthProfileStore();
   const registry = await readRegistry();
@@ -95,7 +132,9 @@ export async function llmInventory(cfg: OpenClawConfig) {
     typeof configuredDefault === "string" ? configuredDefault : (configuredDefault?.primary ?? ""),
   ];
   for (const provider of providerIds) {
-    const profiles = Object.entries(store.profiles).filter(([, c]) => c.provider === provider);
+    const profiles = Object.entries(store.profiles).filter(
+      ([id, c]) => c.provider === provider && !id.startsWith("managed-model:"),
+    );
     if (profiles.length) {
       for (const [profileId] of profiles) {
         if (profileId.startsWith("managed-model:")) continue;
@@ -173,11 +212,13 @@ export async function resolveLlmConnection(
   const stored = (await readRegistry()).connections.find((c) => c.id === id);
   const store = ensureAuthProfileStore();
   const imported = Object.entries(store.profiles).find(([key]) => stableId(key) === id);
-  const catalog = await loadModelCatalog({ config: cfg });
+  const catalog = await connectionCatalog(cfg);
   const provider =
     stored?.provider ??
     imported?.[1].provider ??
-    Object.keys(cfg.models?.providers ?? {}).find((p) => stableId(`provider:${p}`) === id);
+    [...configuredProviderIds(cfg)].find(
+      (p) => catalog.some((m) => m.provider === p) && stableId(`provider:${p}`) === id,
+    );
   const revision = stored?.revisions.find(
     (r) => r.version === (version ?? stored.revisions.at(-1)?.version),
   );

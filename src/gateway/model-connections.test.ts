@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
   dir: "",
+  providerReady: false,
+  staticProviders: {} as Record<
+    string,
+    { models: Array<{ id: string; name: string; input: string[] }> }
+  >,
   profiles: {} as Record<string, { type: "api_key"; provider: string; key: string }>,
 }));
 vi.mock("../config/paths.js", () => ({ resolveStateDir: () => state.dir }));
@@ -27,7 +32,12 @@ vi.mock("../agents/model-catalog.js", () => ({
     { provider: "installed", id: "model", name: "Model", input: ["text"] },
   ],
 }));
-vi.mock("../agents/model-auth.js", () => ({ hasAvailableAuthForProvider: async () => false }));
+vi.mock("../agents/models-config.providers.implicit.js", () => ({
+  resolveImplicitProviders: async () => state.staticProviders,
+}));
+vi.mock("../agents/model-auth.js", () => ({
+  hasAvailableAuthForProvider: async () => state.providerReady,
+}));
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import {
   configureLlm,
@@ -129,4 +139,37 @@ it("cannot overwrite an accepted credential through concurrent reused operation 
   await expect(
     configureLlm({}, { ...base, credential: credentials[winner] }),
   ).resolves.toMatchObject({ id: initial.id, version: 2 });
+});
+
+it("resolves imported environment-backed providers configured through the model allowlist", async () => {
+  state.providerReady = true;
+  try {
+    const cfg = { agents: { defaults: { models: { "installed/model": {} } } } };
+    const inventory = await llmInventory(cfg);
+    const imported = inventory.connections.find((c) => c.operationId === "import");
+    expect(imported).toBeDefined();
+    await expect(resolveLlmConnection(cfg, imported!.id, "model", 1)).resolves.toEqual({
+      model: "installed/model",
+      profileId: undefined,
+    });
+  } finally {
+    state.providerReady = false;
+  }
+});
+
+it("retains configured installed providers with missing credentials using their static catalog", async () => {
+  state.staticProviders = {
+    offline: { models: [{ id: "model", name: "Offline model", input: ["text"] }] },
+  };
+  try {
+    const cfg = { agents: { defaults: { models: { "offline/model": {} } } } };
+    const inventory = await llmInventory(cfg);
+    const connection = inventory.connections.find((c) => c.provider === "offline");
+    expect(connection).toMatchObject({ ready: false, modelIds: ["model"] });
+    await expect(resolveLlmConnection(cfg, connection!.id, "model", 1)).rejects.toThrow(
+      "credential_unavailable",
+    );
+  } finally {
+    state.staticProviders = {};
+  }
 });
