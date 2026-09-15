@@ -1,8 +1,19 @@
 /** Only trusted runtime failures feed this classification, never model reply text. */
 export function classifyManagedLlmError(
   error: unknown,
-): "authentication_failed" | "rate_limited" | "unreachable" | "invalid_output" {
+):
+  | "authentication_failed"
+  | "insufficient_balance"
+  | "rate_limited"
+  | "unreachable"
+  | "invalid_output" {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  if (
+    /\b402\b|insufficient[ _-]balance|insufficient[ _-]quota|billing[ _-](error|limit|hard_limit)|credit balance.*(low|exhausted)/i.test(
+      message,
+    )
+  )
+    return "insufficient_balance";
   if (
     /No API key|credential[ _](unavailable|missing)|invalid.{0,12}(api.?key|credential)|unauthorized|authentication|\b401\b|\b403\b/i.test(
       message,
@@ -14,7 +25,12 @@ export function classifyManagedLlmError(
 }
 export function managedLlmResultIdentity(result: unknown): {
   model?: string;
-  error?: "authentication_failed" | "rate_limited" | "unreachable" | "invalid_output";
+  error?:
+    | "authentication_failed"
+    | "insufficient_balance"
+    | "rate_limited"
+    | "unreachable"
+    | "invalid_output";
 } {
   const meta = (
     result as {

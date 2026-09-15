@@ -21,3 +21,12 @@ it("normalizes trusted failures without exposing their content", () => {
   expect(classifyManagedLlmError(new Error("HTTP 429"))).toBe("rate_limited");
   expect(classifyManagedLlmError(new Error("private diagnostic"))).toBe("unreachable");
 });
+
+it("preserves billing failures across thrown and terminal managed results", () => {
+  expect(classifyManagedLlmError(new Error("402 Insufficient Balance"))).toBe(
+    "insufficient_balance",
+  );
+  expect(managedLlmResultIdentity({ meta: { error: { message: "billing_error" } } })).toEqual({
+    error: "insufficient_balance",
+  });
+});
