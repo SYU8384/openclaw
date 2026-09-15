@@ -171,7 +171,6 @@ class GatewayRestartTransaction {
     nextConfig: OpenClawConfig,
     options?: GatewayRestartRequestOptions,
   ): void {
-    this.holdResponse(options);
     this.preserveDebt(this.createRequestDetails(plan, nextConfig, options));
   }
 
