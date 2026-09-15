@@ -1811,7 +1811,9 @@ describe("managed reload transaction ownership", () => {
       const close = vi.fn();
       const responseSettled = createDeferred();
       const newerResponseSettled = createDeferred();
-      const application = createRuntimeConfigWriteApplication(undefined, responseSettled.promise);
+      const application = createRuntimeConfigWriteApplication(undefined, {
+        responseSettled: responseSettled.promise,
+      });
       hoisted.activeTaskCount.value = 1;
       hoisted.activeTaskBlockers.push(makeActiveTaskBlocker({ taskId: "response-gate-blocker" }));
       const reloader = startManagedGatewayConfigReloader({
@@ -1865,10 +1867,9 @@ describe("managed reload transaction ownership", () => {
         } else if (transition === "newer write") {
           nextConfig = { ...nextConfig, gateway: { ...nextConfig.gateway, port: 18_791 } };
           persistedHash = "newer-response-gate";
-          const newerApplication = createRuntimeConfigWriteApplication(
-            undefined,
-            newerResponseSettled.promise,
-          );
+          const newerApplication = createRuntimeConfigWriteApplication(undefined, {
+            responseSettled: newerResponseSettled.promise,
+          });
           listener(
             attachRuntimeConfigWriteApplication(
               createConfigWriteNotification(

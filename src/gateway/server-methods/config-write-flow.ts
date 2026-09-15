@@ -247,10 +247,9 @@ export async function commitGatewayConfigWrite(params: {
 }> {
   const responseSettled = holdGatewayPolicyResponse(params.respond)?.settled;
   const application = params.awaitRuntimeApplication
-    ? createRuntimeConfigWriteApplication(
-        captureGatewayRootWorkAdmissionContinuationScope()?.run,
-        { responseSettled },
-      )
+    ? createRuntimeConfigWriteApplication(captureGatewayRootWorkAdmissionContinuationScope()?.run, {
+        responseSettled,
+      })
     : undefined;
   const result = await replaceConfigFile({
     sourceConfig: params.nextConfig,

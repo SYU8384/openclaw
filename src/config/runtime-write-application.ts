@@ -31,7 +31,10 @@ const runtimeConfigWriteApplications = new WeakMap<object, RuntimeConfigWriteApp
 /** Creates a single-owner receipt for one persisted config write. */
 export function createRuntimeConfigWriteApplication(
   runTransaction?: <T>(run: () => Promise<T>) => Promise<T>,
-  activation?: Pick<RuntimeConfigWriteApplicationClaim, "prepare" | "requireImmediateApplication" | "responseSettled">,
+  activation?: Pick<
+    RuntimeConfigWriteApplicationClaim,
+    "prepare" | "requireImmediateApplication" | "responseSettled"
+  >,
 ): RuntimeConfigWriteApplication {
   let claimed = false;
   const result = createDeferredCore<RuntimeConfigWriteApplicationStatus>();
