@@ -164,7 +164,6 @@ function readMockRuntimeAuthProfileStore(agentDir?: string) {
 }
 
 vi.mock("../auth-profiles.js", () => ({
-  loadAuthProfileStoreForRuntime: (agentDir?: string) => readMockAuthProfileStore(agentDir),
   externalCliDiscoveryForProviderAuth: (params: { provider: string }) => params,
   ensureAuthProfileStore: readMockRuntimeAuthProfileStore,
   loadAuthProfileStoreForRuntime: readMockRuntimeAuthProfileStore,
