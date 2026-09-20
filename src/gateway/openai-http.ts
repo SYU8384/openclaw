@@ -163,6 +163,7 @@ function buildAgentCommandInput(params: {
   clientTools?: ClientToolDefinition[];
   modelOverride?: string;
   pinnedAuthProfileId?: string;
+  managedProvider?: import("../agents/command/types.js").AgentCommandOpts["managedProvider"];
   disableModelFallback?: boolean;
   sessionKey: string;
   runId: string;
@@ -177,6 +178,7 @@ function buildAgentCommandInput(params: {
     clientTools: params.clientTools,
     model: params.modelOverride,
     pinnedAuthProfileId: params.pinnedAuthProfileId,
+    managedProvider: params.managedProvider,
     disableModelFallback: params.disableModelFallback,
     sessionKey: params.sessionKey,
     runId: params.runId,
@@ -1070,6 +1072,7 @@ export async function handleOpenAiHttpRequest(
     .filter((part): part is string => Boolean(part))
     .join("\n\n");
   let pinnedAuthProfileId: string | undefined;
+  let managedProvider: import("../agents/command/types.js").AgentCommandOpts["managedProvider"];
   let selectedModelOverride = modelOverride;
   const connectionId = req.headers["x-openclaw-connection"];
   if (connectionId !== undefined) {
@@ -1100,6 +1103,7 @@ export async function handleOpenAiHttpRequest(
         version,
       );
       pinnedAuthProfileId = selected.profileId;
+      managedProvider = selected.managedProvider;
       selectedModelOverride = selected.model;
     } catch (error) {
       sendJson(res, 503, {
@@ -1121,6 +1125,7 @@ export async function handleOpenAiHttpRequest(
     clientTools: resolvedClientTools.length > 0 ? resolvedClientTools : undefined,
     modelOverride: selectedModelOverride,
     pinnedAuthProfileId,
+    managedProvider,
     disableModelFallback: connectionId !== undefined,
     sessionKey,
     runId,

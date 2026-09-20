@@ -25,7 +25,40 @@ export class LlmConnectionError extends Error {
   }
 }
 
+// Setup is an admin operation. Provider-owned definitions supply region/API defaults;
+// browser input can select a method but never supply an arbitrary credential destination.
+async function setupProviders(cfg: OpenClawConfig) {
+  const { resolvePluginProviders } = await import("../plugins/providers.runtime.js");
+  return resolvePluginProviders({
+    config: cfg,
+    mode: "setup",
+    includeUntrustedWorkspacePlugins: false,
+  });
+}
+
+function publicProviderConfig(config: import("../config/types.models.js").ModelProviderConfig) {
+  const url = new URL(config.baseUrl);
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
+    throw new Error("Managed provider requires a credential-free HTTPS endpoint.");
+  return {
+    baseUrl: url.toString().replace(/\/$/, ""),
+    ...(config.api ? { api: config.api } : {}),
+    ...(config.authHeader !== undefined ? { authHeader: config.authHeader } : {}),
+    models: config.models.map(({ id, name, reasoning, input, cost, contextWindow, maxTokens }) => ({
+      id,
+      name,
+      reasoning,
+      input,
+      cost,
+      contextWindow,
+      maxTokens,
+    })),
+  };
+}
+
 type Revision = {
+  authMethodId?: string;
+  providerConfig?: import("../config/types.models.js").ModelProviderConfig;
   version: number;
   profileId?: string;
   operationId: string;
@@ -98,6 +131,20 @@ function configuredProviderIds(cfg: OpenClawConfig): Set<string> {
 
 async function connectionCatalog(cfg: OpenClawConfig) {
   const catalog = [...(await loadModelCatalog({ config: cfg }))];
+  // New connections remain resolvable without changing the global provider configuration.
+  for (const connection of (await readRegistry()).connections) {
+    for (const revision of connection.revisions) {
+      for (const model of revision.providerConfig?.models ?? []) {
+        if (!catalog.some((m) => m.provider === connection.provider && m.id === model.id))
+          catalog.push({
+            id: model.id,
+            name: model.name,
+            provider: connection.provider,
+            input: model.input,
+          });
+      }
+    }
+  }
   const missing = [...configuredProviderIds(cfg)].filter(
     (id) => !catalog.some((m) => m.provider === id),
   );
@@ -122,7 +169,26 @@ async function connectionCatalog(cfg: OpenClawConfig) {
 
 export async function llmInventory(cfg: OpenClawConfig) {
   const catalog = await connectionCatalog(cfg);
-  const providerIds = [...new Set(catalog.map((m) => m.provider))].sort();
+  const plugins = await setupProviders(cfg);
+  const supported = plugins.filter((p) =>
+    p.auth.some((a) => a.kind === "api_key" && a.managedApiKey),
+  );
+  for (const provider of supported) {
+    for (const method of provider.auth) {
+      for (const model of method.managedApiKey?.providerConfig()?.models ?? []) {
+        if (!catalog.some((m) => m.provider === provider.id && m.id === model.id))
+          catalog.push({
+            id: model.id,
+            name: model.name,
+            provider: provider.id,
+            input: model.input,
+          });
+      }
+    }
+  }
+  const providerIds = [
+    ...new Set([...catalog.map((m) => m.provider), ...supported.map((p) => p.id)]),
+  ].sort();
   const store = ensureAuthProfileStore();
   const registry = await readRegistry();
   const imported: Connection[] = [];
@@ -167,7 +233,15 @@ export async function llmInventory(cfg: OpenClawConfig) {
     defaultModel,
     providers: providerIds.map((id) => ({
       id,
-      name: id,
+      name: plugins.find((p) => p.id === id)?.label ?? id,
+      authMethods:
+        plugins
+          .find((p) => p.id === id)
+          ?.auth.filter((a) => a.kind === "api_key" && a.managedApiKey)
+          .map((a) => ({ id: a.id, label: a.label, hint: a.hint })) ??
+        (cfg.models?.providers?.[id]
+          ? [{ id: "configured-api", label: "API key (configured endpoint)", hint: undefined }]
+          : []),
       models: catalog
         .filter((m) => m.provider === id)
         .map((m) => ({
@@ -195,6 +269,8 @@ export async function llmInventory(cfg: OpenClawConfig) {
           runtimeRef: c.id,
           version: revision.version,
           operationId: revision.operationId,
+          authMethodId: revision.authMethodId,
+          endpoint: revision.providerConfig?.baseUrl,
           ready,
           modelIds: catalog.filter((m) => m.provider === c.provider).map((m) => m.id),
         };
@@ -232,7 +308,13 @@ export async function resolveLlmConnection(
     ? Boolean(await resolveApiKeyForProfile({ cfg, store, profileId }))
     : await hasAvailableAuthForProvider({ cfg, provider });
   if (!ready) throw new LlmConnectionError("credential_unavailable");
-  return { model: `${provider}/${key}`, profileId };
+  return {
+    model: `${provider}/${key}`,
+    profileId,
+    ...(revision?.providerConfig
+      ? { managedProvider: { id: provider, config: revision.providerConfig } }
+      : {}),
+  };
 }
 
 export async function configureLlm(
@@ -244,11 +326,29 @@ export async function configureLlm(
     provider: string;
     name: string;
     credential: string;
+    authMethodId?: string;
   },
 ) {
   const inventory = await llmInventory(cfg);
   if (!inventory.providers.some((p) => p.id === input.provider))
     throw new Error("Provider is not installed.");
+  const plugin = (await setupProviders(cfg)).find((p) => p.id === input.provider);
+  const method = input.authMethodId
+    ? plugin?.auth.find(
+        (a) => a.id === input.authMethodId && a.kind === "api_key" && a.managedApiKey,
+      )
+    : undefined;
+  const configuredMethod =
+    !plugin && input.authMethodId === "configured-api"
+      ? cfg.models?.providers?.[input.provider]
+      : undefined;
+  if (input.authMethodId && !method && !configuredMethod)
+    throw new Error("Unsupported API-key setup method.");
+  // Preserve legacy API-key clients, but never accept a key for an OAuth-only provider.
+  if (plugin && !plugin.auth.some((a) => a.kind === "api_key"))
+    throw new Error("This provider requires browser sign-in.");
+  const nativeConfig = method?.managedApiKey?.providerConfig() ?? configuredMethod;
+  const providerConfig = nativeConfig ? publicProviderConfig(nativeConfig) : undefined;
   return updateRegistry(async (registry) => {
     const completed = registry.connections.find((c) =>
       c.revisions.some((v) => v.operationId === input.operationId),
@@ -263,6 +363,7 @@ export async function configureLlm(
           })
         : null;
       if (
+        revision.authMethodId !== input.authMethodId ||
         revision.configuredName !== input.name ||
         revision.expectedVersion !== input.expectedVersion ||
         credential?.apiKey !== input.credential ||
@@ -315,6 +416,8 @@ export async function configureLlm(
       operationId: input.operationId,
       configuredName: input.name,
       expectedVersion: input.expectedVersion,
+      authMethodId: input.authMethodId,
+      providerConfig: providerConfig ?? c.revisions.at(-1)?.providerConfig,
     });
     return { id: c.id, version, accountScope: `provider:${c.provider}` };
   });

@@ -69,6 +69,11 @@ export type AgentCommandOpts = {
   provider?: string;
   /** Trusted, request-only credential selection; never persisted to the session. */
   pinnedAuthProfileId?: string;
+  /** Trusted managed-connection transport, scoped to this run rather than global config. */
+  managedProvider?: {
+    id: string;
+    config: import("../../config/types.models.js").ModelProviderConfig;
+  };
   /** External orchestrator owns alternatives for this request. */
   disableModelFallback?: boolean;
   /** Per-run model override. */

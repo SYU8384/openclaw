@@ -638,7 +638,9 @@ async function prepareAgentCommandExecution(opts: AgentCommandOpts, runtime: Run
 
   const { cfg } = await resolveAgentRuntimeConfig(runtime, {
     runtimeTargetsChannelSecrets: opts.deliver === true,
+    managedProvider: opts.managedProvider,
   });
+
   const normalizedSpawned = normalizeSpawnedRunMetadata({
     spawnedBy: opts.spawnedBy,
     groupId: opts.groupId,

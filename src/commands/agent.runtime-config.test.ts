@@ -229,3 +229,29 @@ describe("agentCommand runtime config", () => {
     });
   });
 });
+
+it("uses a managed region only in the selected run and preserves the global provider", async () => {
+  const loaded: OpenClawConfig = {
+    models: {
+      providers: {
+        regional: {
+          baseUrl: "https://api.example.com/anthropic",
+          models: [],
+        },
+      },
+    },
+  };
+  loadConfigMock.mockReturnValue(loaded);
+  const china = await resolveAgentRuntimeConfig(runtime, {
+    managedProvider: {
+      id: "regional",
+      config: { baseUrl: "https://api.example.cn/anthropic", models: [] },
+    },
+  });
+  const normal = await resolveAgentRuntimeConfig(runtime);
+  expect(china.cfg.models?.providers?.regional.baseUrl).toBe("https://api.example.cn/anthropic");
+  expect(normal.cfg).toBe(loaded);
+  expect(loaded.models?.providers?.regional.baseUrl).toBe("https://api.example.com/anthropic");
+  expect(setRuntimeConfigSnapshotMock).toHaveBeenCalledWith(loaded, loaded);
+  expect(setRuntimeConfigSnapshotMock).not.toHaveBeenCalledWith(china.cfg, expect.anything());
+});

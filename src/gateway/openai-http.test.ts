@@ -29,6 +29,10 @@ vi.mock("./model-connections.js", () => ({
   resolveLlmConnection: vi.fn(async () => ({
     model: "openai/gpt-5.4",
     profileId: "managed-fixture",
+    managedProvider: {
+      id: "openai",
+      config: { baseUrl: "https://regional.example.com/v1", models: [] },
+    },
   })),
 }));
 
@@ -395,6 +399,10 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         expect(agentCommand.mock.calls[0]?.[0]).toMatchObject({
           model: "openai/gpt-5.4",
           pinnedAuthProfileId: "managed-fixture",
+          managedProvider: {
+            id: "openai",
+            config: { baseUrl: "https://regional.example.com/v1", models: [] },
+          },
           disableModelFallback: true,
         });
         await managed.text();

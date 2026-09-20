@@ -415,6 +415,8 @@ export type ProviderAuthMethod = {
   label: string;
   hint?: string;
   kind: ProviderAuthKind;
+  /** Non-interactive API-key setup owned by the provider; contains no credentials. */
+  managedApiKey?: { providerConfig: () => ModelProviderConfig | undefined };
   /**
    * Optional wizard/onboarding metadata for this specific auth method.
    *

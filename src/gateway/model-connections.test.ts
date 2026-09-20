@@ -5,11 +5,24 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 const state = vi.hoisted(() => ({
   dir: "",
   providerReady: false,
+  setupProviders: [] as Array<{
+    id: string;
+    label: string;
+    auth: Array<{
+      id: string;
+      kind: string;
+      label: string;
+      managedApiKey?: { providerConfig: () => object };
+    }>;
+  }>,
   staticProviders: {} as Record<
     string,
     { models: Array<{ id: string; name: string; input: string[] }> }
   >,
   profiles: {} as Record<string, { type: "api_key"; provider: string; key: string }>,
+}));
+vi.mock("../plugins/providers.runtime.js", () => ({
+  resolvePluginProviders: () => state.setupProviders,
 }));
 vi.mock("../config/paths.js", () => ({ resolveStateDir: () => state.dir }));
 vi.mock("../agents/auth-profiles.js", () => ({
@@ -171,5 +184,118 @@ it("retains configured installed providers with missing credentials using their 
     );
   } finally {
     state.staticProviders = {};
+  }
+});
+
+it("discovers unconfigured API setup and isolates China/global transports through replacement and rollback", async () => {
+  const model = { id: "regional-model", name: "Regional model", input: ["text"] };
+  state.setupProviders = [
+    {
+      id: "regional",
+      label: "Regional provider",
+      auth: [
+        {
+          id: "cn",
+          label: "China API",
+          kind: "api_key",
+          managedApiKey: {
+            providerConfig: () => ({
+              baseUrl: "https://api.example.cn/anthropic",
+              api: "anthropic-messages",
+              models: [model],
+              apiKey: "must-not-copy",
+              headers: { Authorization: "must-not-copy" },
+            }),
+          },
+        },
+        {
+          id: "global",
+          label: "Global API",
+          kind: "api_key",
+          managedApiKey: {
+            providerConfig: () => ({
+              baseUrl: "https://api.example.com/anthropic",
+              api: "anthropic-messages",
+              models: [model],
+            }),
+          },
+        },
+      ],
+    },
+    {
+      id: "portal",
+      label: "OAuth provider",
+      auth: [{ id: "oauth", label: "Sign in", kind: "device_code" }],
+    },
+  ];
+  try {
+    const discovered = await llmInventory({});
+    expect(
+      discovered.providers.find((p) => p.id === "regional")?.authMethods.map((m) => m.id),
+    ).toEqual(["cn", "global"]);
+    const first = await configureLlm(
+      {},
+      {
+        operationId: "cn-setup",
+        provider: "regional",
+        name: "China account",
+        credential: "regional-secret",
+        authMethodId: "cn",
+      },
+    );
+    const second = await configureLlm(
+      {},
+      {
+        operationId: "global-setup",
+        connectionId: first.id,
+        expectedVersion: 1,
+        provider: "regional",
+        name: "Global account",
+        credential: "global-secret",
+        authMethodId: "global",
+      },
+    );
+    expect(
+      (await resolveLlmConnection({}, first.id, model.id, 1)).managedProvider?.config.baseUrl,
+    ).toBe("https://api.example.cn/anthropic");
+    expect(
+      (await resolveLlmConnection({}, first.id, model.id, 2)).managedProvider?.config.baseUrl,
+    ).toBe("https://api.example.com/anthropic");
+    const rollback = await rollbackLlm(first.id, "cn-setup", "regional-rollback", second.version);
+    expect(
+      (await resolveLlmConnection({}, first.id, model.id, rollback.version)).managedProvider?.config
+        .baseUrl,
+    ).toBe("https://api.example.cn/anthropic");
+    const inventory = JSON.stringify(await llmInventory({}));
+    expect(inventory).not.toMatch(/regional-secret|global-secret|must-not-copy/);
+    const config = (await resolveLlmConnection({}, first.id, model.id, 1)).managedProvider?.config;
+    expect(config).not.toHaveProperty("apiKey");
+    expect(config).not.toHaveProperty("headers");
+    await expect(
+      configureLlm(
+        {},
+        {
+          operationId: "bad-method",
+          provider: "regional",
+          name: "Account",
+          credential: "secret",
+          authMethodId: "oauth",
+        },
+      ),
+    ).rejects.toThrow("Unsupported API-key");
+    await expect(
+      configureLlm(
+        {},
+        {
+          operationId: "cn-setup",
+          provider: "regional",
+          name: "China account",
+          credential: "regional-secret",
+          authMethodId: "global",
+        },
+      ),
+    ).rejects.toThrow("Operation conflict");
+  } finally {
+    state.setupProviders = [];
   }
 });

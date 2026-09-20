@@ -1,16 +1,25 @@
 import { createServer } from "node:http";
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ inventory: vi.fn(), configure: vi.fn(), authorize: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  inventory: vi.fn(),
+  configure: vi.fn(),
+  authorize: vi.fn(),
+  resolve: vi.fn(),
+  agent: vi.fn(),
+}));
 vi.mock("./model-connections.js", () => ({
   llmInventory: mocks.inventory,
   configureLlm: mocks.configure,
-  resolveLlmConnection: vi.fn(),
+  resolveLlmConnection: mocks.resolve,
   rollbackLlm: vi.fn(),
 }));
 vi.mock("./http-utils.js", () => ({
   authorizeScopedGatewayHttpRequestOrReply: mocks.authorize,
   resolveOpenAiCompatibleHttpOperatorScopes: vi.fn(),
 }));
+vi.mock("../commands/agent.js", () => ({ agentCommandFromIngress: mocks.agent }));
+vi.mock("../cli/deps.js", () => ({ createDefaultDeps: () => ({}) }));
+vi.mock("../runtime.js", () => ({ defaultRuntime: {} }));
 import { handleModelConnectionsHttpRequest } from "./model-connections-http.js";
 const server = createServer((req, res) => {
   void handleModelConnectionsHttpRequest(req, res, { auth: { mode: "none" } }).then((handled) => {
@@ -83,4 +92,68 @@ it("rejects unsupported custom endpoints before configuration", async () => {
 });
 it("rejects mutations using GET", async () => {
   expect((await fetch(base + "configure")).status).toBe(405);
+});
+
+it("accepts a discovered native setup method without accepting client endpoint overrides", async () => {
+  mocks.configure.mockResolvedValue({ id: "managed", version: 1 });
+  const input = {
+    operationId: "b131bb6a-d7aa-44bd-8b09-2121fb956828",
+    name: "China plan",
+    provider: "minimax",
+    authMethodId: "api-cn",
+    credential: "synthetic-test-key",
+  };
+  const response = await fetch(base + "configure", { method: "POST", body: JSON.stringify(input) });
+  expect(response.status).toBe(200);
+  expect(mocks.configure).toHaveBeenCalledWith({}, input);
+  expect(await response.text()).not.toContain("synthetic-test-key");
+});
+
+it("tests each model in a replacement with its pinned transport while throttling duplicate probes", async () => {
+  const managedProvider = {
+    id: "regional",
+    config: { baseUrl: "https://api.example.cn/anthropic", models: [] },
+  };
+  mocks.resolve.mockImplementation(async (_cfg, _id, model) => ({
+    model: `regional/${model}`,
+    profileId: "protected",
+    managedProvider,
+  }));
+  mocks.agent.mockImplementation(async (input) => {
+    const nonce = String(input.message).match(/[0-9a-f]{8}-[0-9a-f-]{27}/)?.[0];
+    const model = String(input.model).split("/")[1];
+    return {
+      payloads: [{ text: JSON.stringify({ probe: nonce }) }],
+      meta: {
+        agentMeta: { provider: "regional", model },
+        pendingToolCalls: [{ name: "llm_probe", arguments: JSON.stringify({ nonce }) }],
+      },
+    };
+  });
+  const probe = (modelId: string) =>
+    fetch(base + "test", {
+      method: "POST",
+      body: JSON.stringify({
+        connectionId: "regional-probe",
+        version: 2,
+        modelId,
+        operationId: "b131bb6a-d7aa-44bd-8b09-2121fb956828",
+      }),
+    });
+  const first = await probe("one");
+  expect(first.status).toBe(200);
+  expect(await first.json()).toMatchObject({
+    result: { valid: true, capabilities: ["text", "json", "tools"] },
+  });
+  expect((await probe("two")).status).toBe(200);
+  expect((await probe("one")).status).toBe(429);
+  expect(mocks.agent).toHaveBeenCalledWith(
+    expect.objectContaining({
+      managedProvider,
+      pinnedAuthProfileId: "protected",
+      disableModelFallback: true,
+    }),
+    expect.anything(),
+    expect.anything(),
+  );
 });

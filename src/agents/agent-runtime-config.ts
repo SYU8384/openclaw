@@ -9,7 +9,13 @@ import type { RuntimeEnv } from "../runtime.js";
 /** Loads runtime/source config and resolves command SecretRefs when the agent path needs them. */
 export async function resolveAgentRuntimeConfig(
   runtime: RuntimeEnv,
-  params?: { runtimeTargetsChannelSecrets?: boolean },
+  params?: {
+    runtimeTargetsChannelSecrets?: boolean;
+    managedProvider?: {
+      id: string;
+      config: import("../config/types.models.js").ModelProviderConfig;
+    };
+  },
 ): Promise<{
   loadedRaw: OpenClawConfig;
   sourceConfig: OpenClawConfig;
@@ -47,7 +53,18 @@ export async function resolveAgentRuntimeConfig(
       ).resolvedConfig
     : loadedRaw;
   setRuntimeConfigSnapshot(cfg, sourceConfig);
-  return { loadedRaw, sourceConfig, cfg };
+  // Keep the global snapshot unchanged. A staged regional endpoint belongs only to this run.
+  const selected = params?.managedProvider;
+  const requestConfig = selected
+    ? {
+        ...cfg,
+        models: {
+          ...cfg.models,
+          providers: { ...cfg.models?.providers, [selected.id]: selected.config },
+        },
+      }
+    : cfg;
+  return { loadedRaw, sourceConfig, cfg: requestConfig };
 }
 
 function hasNestedSecretRef(value: unknown): boolean {

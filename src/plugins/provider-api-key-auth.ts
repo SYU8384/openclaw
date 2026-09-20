@@ -100,6 +100,9 @@ export function createProviderApiKeyAuthMethod(
     label: params.label,
     hint: params.hint,
     kind: "api_key",
+    managedApiKey: {
+      providerConfig: () => params.applyConfig?.({}).models?.providers?.[params.providerId],
+    },
     wizard: params.wizard,
     run: async (ctx) => {
       const opts = ctx.opts as Record<string, unknown> | undefined;

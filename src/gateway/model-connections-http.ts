@@ -28,6 +28,7 @@ const configure = z
     provider: identifier,
     name: z.string().trim().min(1).max(100),
     credential: z.string().min(1).max(16384),
+    authMethodId: identifier.optional(),
   })
   .strict();
 const test = z
@@ -125,18 +126,20 @@ export async function handleModelConnectionsHttpRequest(
         );
       } else if (action === "test") {
         const input = test.parse(body);
+        // A replacement verifies each active model; only repeated probes of the same revision/model are throttled.
+        const testKey = JSON.stringify([input.connectionId, input.version, input.modelId]);
         for (const [id, at] of lastTest) if (Date.now() - at > 60000) lastTest.delete(id);
         if (
           testsInFlight.size >= 4 ||
-          (!lastTest.has(input.connectionId) && lastTest.size >= 1000) ||
+          (!lastTest.has(testKey) && lastTest.size >= 1000) ||
           testsInFlight.has(input.connectionId) ||
-          Date.now() - (lastTest.get(input.connectionId) ?? 0) < 30000
+          Date.now() - (lastTest.get(testKey) ?? 0) < 30000
         ) {
           sendJson(res, 429, { ok: false, error: "test_rate_limited" });
           return true;
         }
         testsInFlight.add(input.connectionId);
-        lastTest.set(input.connectionId, Date.now());
+        lastTest.set(testKey, Date.now());
         try {
           const selected = await resolveLlmConnection(
             auth.cfg,
@@ -159,6 +162,7 @@ export async function handleModelConnectionsHttpRequest(
               message: `Return only a JSON object with probe equal to "${nonce}"${supportsImage ? ", and color equal to the solid color shown in the attached image" : ""}. Do not retrieve memory or call tools.`,
               model: selected.model,
               pinnedAuthProfileId: selected.profileId,
+              managedProvider: selected.managedProvider,
               disableModelFallback: true,
               allowModelOverride: true,
               toolsAllow: [],
@@ -194,6 +198,7 @@ export async function handleModelConnectionsHttpRequest(
                   message: `Call llm_probe once with nonce "${nonce}". Do not call other tools.`,
                   model: selected.model,
                   pinnedAuthProfileId: selected.profileId,
+                  managedProvider: selected.managedProvider,
                   disableModelFallback: true,
                   allowModelOverride: true,
                   toolsAllow: ["llm_probe"],
