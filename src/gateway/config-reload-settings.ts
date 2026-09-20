@@ -19,3 +19,18 @@ export function resolveGatewayReloadSettings(cfg: OpenClawConfig): GatewayReload
   const mode = rawMode === "off" || rawMode === "hybrid" ? rawMode : DEFAULT_RELOAD_SETTINGS.mode;
   return { mode, debounceMs: DEFAULT_RELOAD_SETTINGS.debounceMs };
 }
+
+export function resolveChokidarUsePolling(degradedToPolling: boolean): boolean {
+  const envPoll = process.env.CHOKIDAR_USEPOLLING;
+  if (envPoll !== undefined) {
+    const envLower = envPoll.toLowerCase();
+    if (envLower === "false" || envLower === "0") {
+      return false;
+    }
+    if (envLower === "true" || envLower === "1") {
+      return true;
+    }
+    return Boolean(envLower);
+  }
+  return Boolean(process.env.VITEST) || degradedToPolling;
+}

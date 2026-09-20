@@ -117,13 +117,20 @@ import {
   createConfigWriteNotification,
   createDirectConfigWriteFixture,
   createDefaultGatewayReloadState,
+  makePluginReloadResult,
   createTestCronState,
+  createTestCronReconciliation,
+  createCronRestartPlan,
+  createHotTailPlan,
+  createGatewayRestartPlan,
+  createPluginReloadPlan,
   createValidConfigSnapshot,
   publishConfigWrite,
 } from "./server-reload-handlers.config.test-support.js";
 import { createGatewayReloadHandlers as createGatewayReloadHandlersImpl } from "./server-reload-hot.js";
 import { createManagedReloadSecretHandlers } from "./server-reload-managed-secrets.js";
 import { startManagedGatewayConfigReloader as startManagedGatewayConfigReloaderImpl } from "./server-reload-managed.js";
+import { runManagedResponseRestartScenario } from "./server-reload-response.test-support.js";
 import { enforceSharedGatewaySessionGenerationForConfigWrite } from "./server-shared-auth-generation.js";
 import { resolveSharedGatewaySessionGeneration } from "./server/ws-shared-generation.js";
 import { createTerminalLaunchPolicy } from "./terminal/launch.js";
@@ -576,16 +583,6 @@ function makeActiveTaskBlocker(
   };
 }
 
-function makePluginReloadResult(
-  overrides: Partial<GatewayPluginReloadResult> = {},
-): GatewayPluginReloadResult {
-  return {
-    runtime: { operationId: "test-reload", generation: 1, pluginIds: [] },
-    activeChannels: new Set(),
-    ...overrides,
-  };
-}
-
 function enableChannelReloadsForTest() {
   const previousSkipChannels = process.env.OPENCLAW_SKIP_CHANNELS;
   const previousSkipProviders = process.env.OPENCLAW_SKIP_PROVIDERS;
@@ -603,58 +600,6 @@ function enableChannelReloadsForTest() {
       process.env.OPENCLAW_SKIP_PROVIDERS = previousSkipProviders;
     }
   };
-}
-
-function createTestCronReconciliation() {
-  const complete = vi.fn<() => Promise<void>>(async () => {});
-  return {
-    arm: vi.fn<() => { complete: () => Promise<void> }>(() => ({ complete })),
-    complete,
-    invalidate: vi.fn(),
-  };
-}
-
-function createCronRestartPlan(): GatewayReloadPlan {
-  return createHotTailPlan({
-    changedPaths: ["cron"],
-    hotReasons: ["cron"],
-    restartCron: true,
-  });
-}
-
-function createHotTailPlan(overrides: Partial<GatewayReloadPlan> = {}): GatewayReloadPlan {
-  return {
-    changedPaths: ["logging.level"],
-    restartGateway: false,
-    restartReasons: [],
-    hotReasons: ["logging.level"],
-    reloadHooks: false,
-    restartGmailWatcher: false,
-    restartCron: false,
-    restartHeartbeat: false,
-    reloadPlugins: false,
-    restartChannels: new Set(),
-    disposeMcpRuntimes: false,
-    noopPaths: [],
-    ...overrides,
-  };
-}
-
-function createGatewayRestartPlan(changedPath = "gateway.port"): GatewayReloadPlan {
-  return createHotTailPlan({
-    changedPaths: [changedPath],
-    restartGateway: true,
-    restartReasons: [changedPath],
-    hotReasons: [],
-  });
-}
-
-function createPluginReloadPlan(): GatewayReloadPlan {
-  return createHotTailPlan({
-    changedPaths: ["plugins.enabled"],
-    hotReasons: ["plugins.enabled"],
-    reloadPlugins: true,
-  });
 }
 
 function createReloadHandlersForTest(
@@ -1709,138 +1654,19 @@ describe("managed reload transaction ownership", () => {
   it.each(["direct", "watcher echo", "newer write", "stop"] as const)(
     "keeps responses ahead of a forced managed restart across %s",
     async (transition) => {
-      vi.useFakeTimers();
-      const watcher = new chokidar.FSWatcher();
-      const watch = vi.spyOn(chokidar, "watch").mockReturnValue(watcher);
-      const initialConfig = {
-        gateway: {
-          port: 18_789,
-          reload: {},
-          auth: { mode: "token" as const, token: "old-token" },
+      await runManagedResponseRestartScenario(transition, {
+        startReloader: startManagedGatewayConfigReloader,
+        prepareSecrets: makePreparedSecretsSnapshot,
+        setActiveTask: (active) => {
+          hoisted.activeTaskCount.value = active ? 1 : 0;
+          hoisted.activeTaskBlockers.length = 0;
+          if (active) {
+            hoisted.activeTaskBlockers.push(
+              makeActiveTaskBlocker({ taskId: "response-gate-blocker" }),
+            );
+          }
         },
-      } satisfies OpenClawConfig;
-      let nextConfig = {
-        gateway: {
-          port: 18_790,
-          reload: {},
-          auth: { mode: "token" as const, token: "new-token" },
-        },
-      } satisfies OpenClawConfig;
-      let persistedHash = "managed-response-gate";
-      const writeListenerRef = createConfigWriteListenerRef();
-      const requestRecoveryRestart = vi.fn(() => ({ status: "emitted" as const }));
-      const activateRuntimeSecrets = vi.fn(async (config: OpenClawConfig) =>
-        makePreparedSecretsSnapshot(config),
-      );
-      const acceptTerminalConfig = vi.fn();
-      const close = vi.fn();
-      const responseSettled = createDeferred();
-      const newerResponseSettled = createDeferred();
-      const application = createRuntimeConfigWriteApplication(undefined, {
-        responseSettled: responseSettled.promise,
       });
-      hoisted.activeTaskCount.value = 1;
-      hoisted.activeTaskBlockers.push(makeActiveTaskBlocker({ taskId: "response-gate-blocker" }));
-      const reloader = startManagedGatewayConfigReloader({
-        initialConfig,
-        readSnapshot: vi.fn(async () =>
-          createValidConfigSnapshot(nextConfig, persistedHash),
-        ) as never,
-        subscribeToWrites: captureConfigWriteListener(writeListenerRef),
-        activateRuntimeSecrets: activateRuntimeSecrets as never,
-        acceptTerminalConfig,
-        requestRecoveryRestart,
-        resolveSharedGatewaySessionGenerationForConfig: (config) =>
-          typeof config.gateway?.auth?.token === "string" ? config.gateway.auth.token : undefined,
-        sharedGatewaySessionGenerationState: { current: "old-token", required: null },
-        clients: [
-          {
-            usesSharedGatewayAuth: true,
-            sharedGatewaySessionGeneration: "old-token",
-            socket: { close },
-          },
-        ],
-      });
-      const listener = writeListenerRef.current;
-      if (!listener) {
-        throw new Error("Expected config write listener to be registered");
-      }
-      const event = attachRuntimeConfigWriteApplication(
-        createConfigWriteNotification(
-          nextConfig,
-          persistedHash,
-          1,
-          "runtime-managed-response-gate",
-          "source-managed-response-gate",
-        ),
-        application,
-      );
-
-      try {
-        listener(event);
-        await vi.advanceTimersByTimeAsync(0);
-        await expect(application.result).resolves.toBe("restart-pending");
-        expect(application.claimed).toBe(true);
-        expect(activateRuntimeSecrets).toHaveBeenCalledTimes(1);
-        expect(requestRecoveryRestart).not.toHaveBeenCalled();
-        expect(close).toHaveBeenCalledOnce();
-
-        if (transition === "watcher echo") {
-          watcher.emit("change", "/tmp/openclaw.json");
-          await vi.advanceTimersByTimeAsync(300);
-          expect(acceptTerminalConfig).toHaveBeenCalledTimes(2);
-        } else if (transition === "newer write") {
-          nextConfig = { ...nextConfig, gateway: { ...nextConfig.gateway, port: 18_791 } };
-          persistedHash = "newer-response-gate";
-          const newerApplication = createRuntimeConfigWriteApplication(undefined, {
-            responseSettled: newerResponseSettled.promise,
-          });
-          listener(
-            attachRuntimeConfigWriteApplication(
-              createConfigWriteNotification(
-                nextConfig,
-                persistedHash,
-                2,
-                "runtime-newer-gate",
-                "source-newer-gate",
-              ),
-              newerApplication,
-            ),
-          );
-          await vi.advanceTimersByTimeAsync(0);
-          await expect(newerApplication.result).resolves.toBe("restart-pending");
-          // Finishing the newest writer cannot release an older accepted response.
-          newerResponseSettled.resolve();
-        }
-
-        // Even forced restart must wait for the response, after normal work drain expires.
-        await vi.advanceTimersByTimeAsync(300_000);
-        expect(requestRecoveryRestart).not.toHaveBeenCalled();
-
-        if (transition === "stop") {
-          await reloader.stop();
-        }
-        responseSettled.resolve();
-        await vi.advanceTimersByTimeAsync(0);
-        if (transition === "stop") {
-          expect(requestRecoveryRestart).not.toHaveBeenCalled();
-          expect(activateRuntimeSecrets).toHaveBeenCalledTimes(1);
-        } else {
-          expect(requestRecoveryRestart).toHaveBeenCalledOnce();
-          expect(requestRecoveryRestart).toHaveBeenCalledWith(expect.any(String), {
-            force: true,
-            reason: "config reload forced restart",
-          });
-        }
-      } finally {
-        responseSettled.resolve();
-        newerResponseSettled.resolve();
-        await reloader.stop();
-        hoisted.activeTaskCount.value = 0;
-        hoisted.activeTaskBlockers.length = 0;
-        watch.mockRestore();
-        vi.useRealTimers();
-      }
     },
   );
 

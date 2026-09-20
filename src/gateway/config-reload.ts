@@ -59,7 +59,10 @@ import {
   resolvePluginInstallReloadMetadata,
   type GatewayReloadPlan,
 } from "./config-reload-plan.js";
-import { resolveGatewayReloadSettings } from "./config-reload-settings.js";
+import {
+  resolveChokidarUsePolling,
+  resolveGatewayReloadSettings,
+} from "./config-reload-settings.js";
 import type {
   GatewayHotReloadApplication,
   GatewayHotReloadStatus,
@@ -80,21 +83,6 @@ const MISSING_CONFIG_MAX_RETRIES = 2;
 // back to polling mode before giving up entirely.
 const WATCHER_RECREATE_MAX_RETRIES = 3;
 const WATCHER_RECREATE_BACKOFF_MS = [500, 2000, 5000] as const;
-
-function resolveChokidarUsePolling(degradedToPolling: boolean): boolean {
-  const envPoll = process.env.CHOKIDAR_USEPOLLING;
-  if (envPoll !== undefined) {
-    const envLower = envPoll.toLowerCase();
-    if (envLower === "false" || envLower === "0") {
-      return false;
-    }
-    if (envLower === "true" || envLower === "1") {
-      return true;
-    }
-    return Boolean(envLower);
-  }
-  return Boolean(process.env.VITEST) || degradedToPolling;
-}
 
 type GatewayConfigReloader = {
   /** Candidate validation and watcher creation; stop owns this work immediately. */
