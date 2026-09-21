@@ -8,7 +8,7 @@ import {
   authorizeScopedGatewayHttpRequestOrReply,
   resolveOpenAiCompatibleHttpOperatorScopes,
 } from "./http-utils.js";
-import { managedLlmResultIdentity } from "./managed-model-result.js";
+import { classifyManagedLlmError, managedLlmResultIdentity } from "./managed-model-result.js";
 import {
   configureLlm,
   LlmConnectionError,
@@ -60,6 +60,45 @@ const readiness = z
   .strict();
 const testsInFlight = new Set<string>();
 const lastTest = new Map<string, number>();
+
+function managedLlmUsage(result: unknown): { inputTokens?: number; outputTokens?: number } {
+  const usage = (
+    result as { meta?: { agentMeta?: { usage?: { input?: unknown; output?: unknown } } } } | null
+  )?.meta?.agentMeta?.usage;
+  const count = (value: unknown) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  const inputTokens = count(usage?.input);
+  const outputTokens = count(usage?.output);
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+  };
+}
+
+function combineManagedLlmUsage(...results: unknown[]): {
+  inputTokens?: number;
+  outputTokens?: number;
+} {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let hasInputTokens = false;
+  let hasOutputTokens = false;
+  for (const result of results) {
+    const usage = managedLlmUsage(result);
+    if (usage.inputTokens !== undefined) {
+      inputTokens += usage.inputTokens;
+      hasInputTokens = true;
+    }
+    if (usage.outputTokens !== undefined) {
+      outputTokens += usage.outputTokens;
+      hasOutputTokens = true;
+    }
+  }
+  return {
+    ...(hasInputTokens ? { inputTokens } : {}),
+    ...(hasOutputTokens ? { outputTokens } : {}),
+  };
+}
 
 export async function handleModelConnectionsHttpRequest(
   req: IncomingMessage,
@@ -157,96 +196,136 @@ export async function handleModelConnectionsHttpRequest(
             .find((p) => p.id === connection?.provider)
             ?.models.find((m) => m.id === input.modelId)
             ?.capabilities.includes("image");
-          const response = await agentCommandFromIngress(
-            {
-              message: `Return only a JSON object with probe equal to "${nonce}"${supportsImage ? ", and color equal to the solid color shown in the attached image" : ""}. Do not retrieve memory or call tools.`,
-              model: selected.model,
-              pinnedAuthProfileId: selected.profileId,
-              managedProvider: selected.managedProvider,
-              disableModelFallback: true,
-              allowModelOverride: true,
-              toolsAllow: [],
-              ...(supportsImage
-                ? { images: [{ type: "image" as const, mimeType: "image/png", data: imageProbe }] }
-                : {}),
-              deliver: false,
-              sessionKey: `managed-model:probe-test:${randomUUID()}`,
-              sessionEffects: "internal",
-              timeout: "45",
-              abortSignal: AbortSignal.timeout(45000),
-            },
-            defaultRuntime,
-            createDefaultDeps(),
-          );
-          const payloads = (response as { payloads?: Array<{ text?: string }> }).payloads;
-          const text = payloads?.map((p) => p.text ?? "").join("") ?? "";
-          let valid = false;
+          let response: unknown;
+          let testErrorCode: ReturnType<typeof classifyManagedLlmError> | undefined;
           try {
-            const parsed = JSON.parse(text);
-            valid =
-              managedLlmResultIdentity(response).model === selected.model &&
-              parsed.probe === nonce &&
-              (!supportsImage || String(parsed.color).toLowerCase() === "red");
-          } catch {
-            /* Invalid structured output is a failed test. */
+            response = await agentCommandFromIngress(
+              {
+                message: `Return only a JSON object with probe equal to "${nonce}"${supportsImage ? ", and color equal to the solid color shown in the attached image" : ""}. Do not retrieve memory or call tools.`,
+                model: selected.model,
+                pinnedAuthProfileId: selected.profileId,
+                managedProvider: selected.managedProvider,
+                disableModelFallback: true,
+                allowModelOverride: true,
+                toolsAllow: [],
+                ...(supportsImage
+                  ? {
+                      images: [{ type: "image" as const, mimeType: "image/png", data: imageProbe }],
+                    }
+                  : {}),
+                deliver: false,
+                sessionKey: `managed-model:probe-test:${randomUUID()}`,
+                sessionEffects: "internal",
+                timeout: "45",
+                abortSignal: AbortSignal.timeout(45000),
+              },
+              defaultRuntime,
+              createDefaultDeps(),
+            );
+          } catch (error) {
+            testErrorCode = classifyManagedLlmError(error);
           }
-          const capabilities = valid ? ["text", "json", ...(supportsImage ? ["image"] : [])] : [];
-          if (valid) {
-            try {
-              const toolResult = await agentCommandFromIngress(
-                {
-                  message: `Call llm_probe once with nonce "${nonce}". Do not call other tools.`,
-                  model: selected.model,
-                  pinnedAuthProfileId: selected.profileId,
-                  managedProvider: selected.managedProvider,
-                  disableModelFallback: true,
-                  allowModelOverride: true,
-                  toolsAllow: ["llm_probe"],
-                  clientTools: [
+          if (testErrorCode) result = { valid: false, capabilities: [], errorCode: testErrorCode };
+          else {
+            const identity = managedLlmResultIdentity(response);
+            if (identity.error) {
+              result = {
+                valid: false,
+                capabilities: [],
+                errorCode: identity.error,
+                ...managedLlmUsage(response),
+              };
+            } else {
+              const payloads = (response as { payloads?: Array<{ text?: string }> }).payloads;
+              const text = payloads?.map((p) => p.text ?? "").join("") ?? "";
+              let valid = false;
+              try {
+                const parsed = JSON.parse(text);
+                valid =
+                  identity.model === selected.model &&
+                  parsed.probe === nonce &&
+                  (!supportsImage || String(parsed.color).toLowerCase() === "red");
+              } catch {
+                /* Invalid structured output is a failed test. */
+              }
+              const capabilities = valid
+                ? ["text", "json", ...(supportsImage ? ["image"] : [])]
+                : [];
+              let toolResponse: unknown;
+              let toolErrorCode: ReturnType<typeof classifyManagedLlmError> | undefined;
+              if (valid) {
+                try {
+                  toolResponse = await agentCommandFromIngress(
                     {
-                      type: "function",
-                      function: {
-                        name: "llm_probe",
-                        description: "Harmless capability probe; returns no private information.",
-                        parameters: {
-                          type: "object",
-                          properties: { nonce: { type: "string" } },
-                          required: ["nonce"],
-                          additionalProperties: false,
+                      message: `Call llm_probe once with nonce "${nonce}". Do not call other tools.`,
+                      model: selected.model,
+                      pinnedAuthProfileId: selected.profileId,
+                      managedProvider: selected.managedProvider,
+                      disableModelFallback: true,
+                      allowModelOverride: true,
+                      toolsAllow: ["llm_probe"],
+                      clientTools: [
+                        {
+                          type: "function",
+                          function: {
+                            name: "llm_probe",
+                            description:
+                              "Harmless capability probe; returns no private information.",
+                            parameters: {
+                              type: "object",
+                              properties: { nonce: { type: "string" } },
+                              required: ["nonce"],
+                              additionalProperties: false,
+                            },
+                          },
                         },
-                      },
+                      ],
+                      deliver: false,
+                      sessionKey: `managed-model:probe-tool-test:${randomUUID()}`,
+                      sessionEffects: "internal",
+                      timeout: "25",
+                      abortSignal: AbortSignal.timeout(25000),
                     },
-                  ],
-                  deliver: false,
-                  sessionKey: `managed-model:probe-tool-test:${randomUUID()}`,
-                  sessionEffects: "internal",
-                  timeout: "25",
-                  abortSignal: AbortSignal.timeout(25000),
-                },
-                defaultRuntime,
-                createDefaultDeps(),
-              );
-              const pending = (
-                toolResult as {
-                  meta?: { pendingToolCalls?: Array<{ name: string; arguments: string }> };
-                }
-              ).meta?.pendingToolCalls;
-              if (
-                managedLlmResultIdentity(toolResult).model === selected.model &&
-                pending?.some((call) => {
-                  try {
-                    return call.name === "llm_probe" && JSON.parse(call.arguments).nonce === nonce;
-                  } catch {
-                    return false;
+                    defaultRuntime,
+                    createDefaultDeps(),
+                  );
+                  const toolIdentity = managedLlmResultIdentity(toolResponse);
+                  if (toolIdentity.error) {
+                    toolErrorCode = toolIdentity.error;
+                  } else {
+                    const pending = (
+                      toolResponse as {
+                        meta?: { pendingToolCalls?: Array<{ name: string; arguments: string }> };
+                      }
+                    ).meta?.pendingToolCalls;
+                    if (
+                      toolIdentity.model === selected.model &&
+                      pending?.some((call) => {
+                        try {
+                          return (
+                            call.name === "llm_probe" && JSON.parse(call.arguments).nonce === nonce
+                          );
+                        } catch {
+                          return false;
+                        }
+                      })
+                    )
+                      capabilities.push("tools");
                   }
-                })
-              )
-                capabilities.push("tools");
-            } catch {
-              /* Text/JSON can remain verified when optional tool capability fails. */
+                } catch (error) {
+                  toolErrorCode = classifyManagedLlmError(error);
+                }
+              }
+              result = toolErrorCode
+                ? {
+                    valid: false,
+                    capabilities: [],
+                    errorCode: toolErrorCode,
+                    ...combineManagedLlmUsage(response, toolResponse),
+                  }
+                : { valid, capabilities, ...managedLlmUsage(response) };
             }
           }
-          result = { valid, capabilities };
         } finally {
           testsInFlight.delete(input.connectionId);
           if (lastTest.size > 1000)

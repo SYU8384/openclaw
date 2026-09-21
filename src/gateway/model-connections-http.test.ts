@@ -157,3 +157,70 @@ it("tests each model in a replacement with its pinned transport while throttling
     expect.anything(),
   );
 });
+
+it("returns a sanitized billing code for terminal and thrown managed test failures", async () => {
+  mocks.resolve.mockResolvedValue({ model: "regional/one", profileId: "protected" });
+  mocks.agent
+    .mockResolvedValueOnce({
+      meta: { error: { message: "402 Insufficient Balance: private provider details" } },
+    })
+    .mockRejectedValueOnce(new Error("402 insufficient balance: private provider details"));
+  const probe = (modelId: string) =>
+    fetch(base + "test", {
+      method: "POST",
+      body: JSON.stringify({
+        connectionId: "billing-probe",
+        version: 3,
+        modelId,
+        operationId: "b131bb6a-d7aa-44bd-8b09-2121fb956828",
+      }),
+    });
+  for (const modelId of ["one", "two"]) {
+    const response = await probe(modelId);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      result: { valid: false, capabilities: [], errorCode: "insufficient_balance" },
+    });
+  }
+});
+
+it("propagates an optional tool probe billing failure with combined sanitized usage", async () => {
+  mocks.resolve.mockResolvedValue({ model: "regional/one", profileId: "protected" });
+  mocks.agent
+    .mockImplementationOnce(async (input) => ({
+      payloads: [
+        {
+          text: JSON.stringify({
+            probe: String(input.message).match(/[0-9a-f]{8}-[0-9a-f-]{27}/)?.[0],
+          }),
+        },
+      ],
+      meta: { agentMeta: { provider: "regional", model: "one", usage: { input: 3, output: 1 } } },
+    }))
+    .mockResolvedValueOnce({
+      meta: {
+        error: { message: "402 insufficient balance: private details" },
+        agentMeta: { usage: { input: 7, output: 2 } },
+      },
+    });
+  const response = await fetch(base + "test", {
+    method: "POST",
+    body: JSON.stringify({
+      connectionId: "tool-billing-probe",
+      version: 3,
+      modelId: "one",
+      operationId: "b131bb6a-d7aa-44bd-8b09-2121fb956828",
+    }),
+  });
+  expect(await response.json()).toEqual({
+    ok: true,
+    result: {
+      valid: false,
+      capabilities: [],
+      errorCode: "insufficient_balance",
+      inputTokens: 10,
+      outputTokens: 3,
+    },
+  });
+});
