@@ -246,7 +246,8 @@ export async function handleModelConnectionsHttpRequest(
                 valid =
                   identity.model === selected.model &&
                   parsed.probe === nonce &&
-                  (!supportsImage || String(parsed.color).toLowerCase() === "red");
+                  (!supportsImage ||
+                    ["red", "#ff0000", "#f00"].includes(String(parsed.color).trim().toLowerCase()));
               } catch {
                 /* Invalid structured output is a failed test. */
               }

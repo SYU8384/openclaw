@@ -229,3 +229,41 @@ it("propagates an optional tool probe billing failure with combined sanitized us
     },
   });
 });
+
+it.each(["red", "#FF0000", "#f00", "blue", null])(
+  "validates image probe color %s",
+  async (color) => {
+    const connectionId = `color-probe-${color}`;
+    mocks.inventory.mockResolvedValue({
+      connections: [{ id: connectionId, provider: "regional" }],
+      providers: [{ id: "regional", models: [{ id: "vision", capabilities: ["image"] }] }],
+    });
+    mocks.resolve.mockResolvedValue({ model: "regional/vision", profileId: "protected" });
+    mocks.agent.mockImplementation(async (input) => {
+      const nonce = String(input.message).match(/[0-9a-f]{8}-[0-9a-f-]{27}/)?.[0];
+      return {
+        payloads: [{ text: JSON.stringify({ probe: nonce, color }) }],
+        meta: {
+          agentMeta: { provider: "regional", model: "vision" },
+          pendingToolCalls: [{ name: "llm_probe", arguments: JSON.stringify({ nonce }) }],
+        },
+      };
+    });
+    const response = await fetch(base + "test", {
+      method: "POST",
+      body: JSON.stringify({
+        connectionId,
+        version: 1,
+        modelId: "vision",
+        operationId: "b131bb6a-d7aa-44bd-8b09-2121fb956828",
+      }),
+    });
+    const valid = color !== "blue" && color !== null;
+    expect(await response.json()).toMatchObject({
+      result: {
+        valid,
+        capabilities: valid ? ["text", "json", "image", "tools"] : [],
+      },
+    });
+  },
+);
