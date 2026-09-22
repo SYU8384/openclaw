@@ -207,6 +207,8 @@ export async function handleModelConnectionsHttpRequest(
                 managedProvider: selected.managedProvider,
                 disableModelFallback: true,
                 allowModelOverride: true,
+                // Probe model capabilities without memory transforms externalizing the image.
+                modelRun: true,
                 toolsAllow: [],
                 ...(supportsImage
                   ? {

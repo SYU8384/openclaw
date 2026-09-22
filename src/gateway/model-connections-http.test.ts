@@ -145,10 +145,15 @@ it("tests each model in a replacement with its pinned transport while throttling
   expect(await first.json()).toMatchObject({
     result: { valid: true, capabilities: ["text", "json", "tools"] },
   });
+  expect(
+    mocks.agent.mock.calls.find(([input]) => input.message.startsWith("Call llm_probe"))?.[0]
+      .modelRun,
+  ).not.toBe(true);
   expect((await probe("two")).status).toBe(200);
   expect((await probe("one")).status).toBe(429);
   expect(mocks.agent).toHaveBeenCalledWith(
     expect.objectContaining({
+      modelRun: true,
       managedProvider,
       pinnedAuthProfileId: "protected",
       disableModelFallback: true,
