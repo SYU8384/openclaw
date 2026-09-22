@@ -17,8 +17,9 @@ import {
   rollbackLlm,
 } from "./model-connections.js";
 
+// A normal-sized fixture avoids unreliable vision preprocessing of tiny thumbnails.
 const imageProbe =
-  "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC";
+  "iVBORw0KGgoAAAANSUhEUgAAAVAAAAFQCAIAAABmirGOAAAC4ElEQVR42u3TAQ0AAAjDMMC/5yMBAbQSlqxTwBcjARgeMDxgeMDwgOEBwwOGBwwPGB4wPGB4MDxgeMDwgOEBwwOGBwwPGB4wPGB4wPBgeMDwgOEBwwOGBwwPGB4wPGB4wPCA4cHwgOEBwwOGBwwPGB4wPGB4wPCA4QHDg+EBwwOGBwwPGB4wPGB4wPCA4QHDA4YHDA+GBwwPGB4wPGB4wPCA4QHDA4YHDA8YHgwPGB4wPGB4wPCA4QHDA4YHDA8YHjA8GB4wPGB4wPCA4QHDA4YHDA8YHjA8YHgwPGB4wPCA4QHDA4YHDA8YHjA8YHjA8GB4wPCA4QHDA4YHDA8YHjA8YHjA8IDhAcOD4QHDA4YHDA8YHjA8YHjA8IDhAcMDhgfDA4YHDA8YHjA8YHjA8IDhAcMDhgcMD4YHDA8YHjA8YHjA8IDhAcMDhgcMDxgeDA8YHjA8YHjA8IDhAcMDhgcMDxgeMDxgeDA8YHjA8IDhAcMDhgcMDxgeMDxgeMDwYHjA8IDhAcMDhgcMDxgeMDxgeMDwgOHB8IDhAcMDhgcMDxgeMDxgeMDwgOEBw4PhAcMDhgcMDxgeMDxgeMDwgOEBwwOGB8MDhgcMDxgeMDxgeMDwgOEBwwOGBwwPGB4MDxgeMDxgeMDwgOEBwwOGBwwPGB4wPBgeMDxgeMDwgOEBwwOGBwwPGB4wPGB4MDxgeMDwgOEBwwOGBwwPGB4wPGB4wPBgeMDwgOEBwwOGBwwPGB4wPGB4wPCA4cHwEoDhAcMDhgcMDxgeMDxgeMDwgOEBwwOGB8MDhgcMDxgeMDxgeMDwgOEBwwOGBwwPhgcMDxgeMDxgeMDwgOEBwwOGBwwPGB4MDxgeMDxgeMDwgOEBwwOGBwwPGB4wPBgeMDxgeMDwgOEBwwOGBwwPGB4wPGB4wPBgeMDwgOEBwwOGBwwPGB4wPGB4wPCA4cHwgOEBwwOGBwwPGB4wPGB4wPDAbQEregOfhxqTCwAAAABJRU5ErkJggg==";
 const identifier = z.string().min(1).max(160);
 const configure = z
   .object({
@@ -201,7 +202,7 @@ export async function handleModelConnectionsHttpRequest(
           try {
             response = await agentCommandFromIngress(
               {
-                message: `Return only a JSON object with probe equal to "${nonce}"${supportsImage ? ", and color equal to the solid color shown in the attached image" : ""}. Do not retrieve memory or call tools.`,
+                message: `Return only a JSON object with probe equal to "${nonce}"${supportsImage ? ", and color equal to the basic English color name of the solid color shown in the attached image" : ""}. Do not retrieve memory or call tools.`,
                 model: selected.model,
                 pinnedAuthProfileId: selected.profileId,
                 managedProvider: selected.managedProvider,

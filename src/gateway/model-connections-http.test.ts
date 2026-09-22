@@ -258,6 +258,9 @@ it.each(["red", "#FF0000", "#f00", "blue", null])(
         operationId: "b131bb6a-d7aa-44bd-8b09-2121fb956828",
       }),
     });
+    const imageCall = mocks.agent.mock.calls.findLast(([input]) => input.images?.length);
+    const png = Buffer.from(imageCall?.[0].images[0].data, "base64");
+    expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([336, 336]);
     const valid = color !== "blue" && color !== null;
     expect(await response.json()).toMatchObject({
       result: {
