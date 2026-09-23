@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { inflateSync } from "node:zlib";
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   inventory: vi.fn(),
@@ -261,6 +262,18 @@ it.each(["red", "#FF0000", "#f00", "blue", null])(
     const imageCall = mocks.agent.mock.calls.findLast(([input]) => input.images?.length);
     const png = Buffer.from(imageCall?.[0].images[0].data, "base64");
     expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([336, 336]);
+    // The checked-in RGB fixture uses literal (filter 0) PNG scanlines.
+    expect(png.toString("ascii", 37, 41)).toBe("IDAT");
+    const data = inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)));
+    const stride = 336 * 3 + 1;
+    for (let y = 0; y < 336; y++) expect(data[y * stride]).toBe(0);
+    const pixel = (x: number, y: number) => [
+      ...data.subarray(y * stride + 1 + x * 3, y * stride + 1 + x * 3 + 3),
+    ];
+    expect(pixel(0, 0)).toEqual([255, 255, 255]);
+    expect(pixel(56, 56)).toEqual([0, 0, 0]);
+    expect(pixel(168, 168)).toEqual([255, 0, 0]);
+    expect(imageCall?.[0].message).toContain("square at the center");
     const valid = color !== "blue" && color !== null;
     expect(await response.json()).toMatchObject({
       result: {
