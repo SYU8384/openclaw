@@ -258,7 +258,7 @@ describe("gateway shared auth rotation", () => {
         sentinel: { payload: { stats: { requiresRestart: true } } },
       });
       await expectAuthChangedClose(connection);
-      await withTestTimeout(emitted.promise, 10_000, "gateway restart was not emitted");
+      await emitted.promise;
       expect(events).toEqual(["success-response", "auth-close", "restart-emission"]);
     },
   );
