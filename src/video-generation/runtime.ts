@@ -1,34 +1,36 @@
-// Video generation runtime coordinates provider auth, fallbacks, and job polling.
 import { resolveAgentModelTimeoutMsValue } from "../config/model-input.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
-import { parseVideoGenerationModelRef } from "../media-generation/model-ref.js";
+import { resolveMediaGeometryOverrides } from "../media-generation/geometry-normalization.js";
+import { createMediaProviderLookup } from "../media-generation/provider-registry.js";
 import {
   getVideoGenerationProvider,
   listVideoGenerationProviders,
-  withVideoGenerationProviders,
 } from "../media-generation/registry.js";
 import {
   buildMediaGenerationNormalizationMetadata,
-  buildNoCapabilityModelConfiguredMessage,
-  resolveCapabilityModelCandidates,
   resolveMediaProviderRequestTimeoutMs,
   runMediaGenerationCandidates,
 } from "../media-generation/runtime-shared.js";
-import {
-  buildCapabilityProviderIndex,
-  normalizeCapabilityProviderId,
-} from "../plugins/provider-registry-shared.js";
+import { withAcquiredPluginCapabilityProviders } from "../plugins/capability-provider-acquisition.js";
 import { getProviderEnvVarsCore } from "../secrets/provider-env-vars.js";
 import { resolveVideoGenerationModeCapabilities } from "./capabilities.js";
 import {
   buildVideoGenerationCapabilityFailure,
   resolveProviderWithModelCapabilities,
 } from "./capability-overlays.js";
-import { resolveVideoGenerationSupportedDurations } from "./duration-support.js";
-import { resolveVideoGenerationOverrides } from "./normalization.js";
+import {
+  normalizeVideoGenerationDuration,
+  resolveVideoGenerationSupportedDurations,
+  selectSupportedVideoDuration,
+} from "./duration-support.js";
 import type { GenerateVideoParams, GenerateVideoRuntimeResult } from "./runtime-types.js";
-import type { VideoGenerationProviderOptionType, VideoGenerationResult } from "./types.js";
+import type {
+  VideoGenerationIgnoredOverride,
+  VideoGenerationNormalization,
+  VideoGenerationProviderOptionType,
+  VideoGenerationResult,
+} from "./types.js";
 
 const log = createSubsystemLogger("video-generation");
 const MODEL_CAPABILITY_LOOKUP_TIMEOUT_MS = 5_000;
@@ -45,19 +47,8 @@ type VideoGenerationRuntimeDeps = {
 export type { GenerateVideoParams, GenerateVideoRuntimeResult } from "./runtime-types.js";
 
 /**
- * Validate agent-supplied providerOptions against the candidate's declared
- * schema. Returns a human-readable skip reason when the candidate cannot
- * accept the supplied options, or undefined when everything checks out.
- *
- * Backward-compatible behavior:
- * - Provider declares no schema (undefined): pass options through as-is.
- *   The provider receives them and may silently ignore unknown keys. This is
- *   the safe default for legacy / not-yet-migrated providers.
- * - Provider explicitly declares an empty schema ({}): rejects any options.
- *   This is the opt-in signal that the provider has been audited and truly
- *   supports no options.
- * - Provider declares a typed schema: validates each key name and value type,
- *   skipping the candidate on any mismatch.
+ * Missing declarations preserve legacy providerOptions passthrough; an empty
+ * declaration rejects options. Declared keys require their specified types.
  */
 function validateProviderOptionsAgainstDeclaration(params: {
   providerId: string;
@@ -67,10 +58,7 @@ function validateProviderOptionsAgainstDeclaration(params: {
 }): string | undefined {
   const { providerId, model, providerOptions, declaration } = params;
   const keys = Object.keys(providerOptions);
-  if (keys.length === 0) {
-    return undefined;
-  }
-  if (declaration === undefined) {
+  if (keys.length === 0 || declaration === undefined) {
     return undefined;
   }
   if (Object.keys(declaration).length === 0) {
@@ -98,19 +86,6 @@ function validateProviderOptionsAgainstDeclaration(params: {
   return undefined;
 }
 
-function buildNoVideoGenerationModelConfiguredMessage(
-  cfg: OpenClawConfig,
-  deps: VideoGenerationRuntimeDeps,
-): string {
-  const listProviders = deps.listProviders ?? listVideoGenerationProviders;
-  return buildNoCapabilityModelConfiguredMessage({
-    capabilityLabel: "video-generation",
-    modelConfigKey: "mediaModels.video",
-    providers: listProviders(cfg),
-    getProviderEnvVars: deps.getProviderEnvVars,
-  });
-}
-
 export function listRuntimeVideoGenerationProviders(
   params?: { config?: OpenClawConfig },
   deps: VideoGenerationRuntimeDeps = {},
@@ -125,20 +100,17 @@ export async function generateVideo(
   if (deps.getProvider && deps.listProviders) {
     return runVideoGeneration(params, deps);
   }
-  return withVideoGenerationProviders(params.cfg, (providers) => {
-    const canonical = buildCapabilityProviderIndex(providers, "canonical");
-    const aliases = buildCapabilityProviderIndex(providers, "aliases");
-    return runVideoGeneration(params, {
-      ...deps,
-      getProvider:
-        deps.getProvider ??
-        ((id) => {
-          const normalized = normalizeCapabilityProviderId(id);
-          return normalized ? aliases.get(normalized) : undefined;
-        }),
-      listProviders: deps.listProviders ?? (() => [...canonical.values()]),
-    });
-  });
+  return withAcquiredPluginCapabilityProviders(
+    { key: "videoGenerationProviders", cfg: params.cfg },
+    (providers) => {
+      const lookup = createMediaProviderLookup(providers);
+      return runVideoGeneration(params, {
+        ...deps,
+        getProvider: deps.getProvider ?? lookup.getProvider,
+        listProviders: deps.listProviders ?? lookup.listProviders,
+      });
+    },
+  );
 }
 
 async function runVideoGeneration(
@@ -151,25 +123,10 @@ async function runVideoGeneration(
   const requestedTimeoutMs =
     params.timeoutMs ??
     resolveAgentModelTimeoutMsValue(params.cfg.agents?.defaults?.mediaModels?.video);
-  const candidates = resolveCapabilityModelCandidates({
-    cfg: params.cfg,
-    modelConfig: params.cfg.agents?.defaults?.mediaModels?.video,
-    modelOverride: params.modelOverride,
-    parseModelRef: parseVideoGenerationModelRef,
-    agentDir: params.agentDir,
-    listProviders,
-    autoProviderFallback: params.autoProviderFallback,
-  });
-  if (candidates.length === 0) {
-    throw new Error(buildNoVideoGenerationModelConfiguredMessage(params.cfg, deps));
-  }
 
   let skipWarnEmitted = false;
   const warnOnFirstSkip = (reason: string) => {
-    // Skip events are common in normal fallback flow, so log the *first* one in
-    // a request at warn level with the reason, and leave the rest at debug.
-    // This gives the operator visible feedback that their primary provider was
-    // passed over without flooding logs on long fallback chains.
+    // Warn once; the coordinator retains every skipped candidate in attempts.
     if (!skipWarnEmitted) {
       skipWarnEmitted = true;
       logger.warn(`video-generation candidate skipped: ${reason}`);
@@ -177,11 +134,15 @@ async function runVideoGeneration(
   };
 
   return runMediaGenerationCandidates({
-    candidates,
+    request: params,
+    listProviders,
+    getProviderEnvVars: deps.getProviderEnvVars,
     capability: "video",
     getProvider: (providerId) => getProvider(providerId, params.cfg),
     onFailure: (attempt) => {
-      logger.debug(`video-generation candidate failed: ${attempt.provider}/${attempt.model}`);
+      logger.warn(
+        `video-generation candidate failed: ${attempt.provider}/${attempt.model}: ${attempt.error}`,
+      );
     },
     async prepareCandidate(candidate, provider) {
       const timeoutMs = resolveMediaProviderRequestTimeoutMs({
@@ -214,32 +175,18 @@ async function runVideoGeneration(
       });
       if (capabilityMismatch) {
         warnOnFirstSkip(capabilityMismatch);
-        logger.debug(
-          `video-generation candidate skipped (mode or reference capability): ${candidate.provider}/${candidate.model}`,
-        );
         return capabilityMismatch;
       }
 
-      // Guard: skip candidates that do not accept the requested providerOptions keys,
-      // or whose declared providerOptions schema does not match the supplied value
-      // types. Same skip-in-fallback rationale as the audio guard above — we never
-      // want to silently forward provider-specific options to the wrong provider,
-      // but we also do not want to block valid fallback candidates that *do* accept
-      // them. Providers opt in by declaring `capabilities.providerOptions` on the
-      // active mode or on the flat provider capabilities.
-      if (
-        params.providerOptions &&
-        typeof params.providerOptions === "object" &&
-        Object.keys(params.providerOptions).length > 0
-      ) {
-        const { capabilities: optCaps } = resolveVideoGenerationModeCapabilities({
-          provider: activeProvider,
-          model: candidate.model,
-          inputImageCount,
-          inputVideoCount,
-        });
+      const { capabilities: modeCapabilities } = resolveVideoGenerationModeCapabilities({
+        provider: activeProvider,
+        model: candidate.model,
+        inputImageCount,
+        inputVideoCount,
+      });
+      if (params.providerOptions) {
         const declaredOptions =
-          optCaps?.providerOptions ?? activeProvider.capabilities.providerOptions ?? undefined;
+          modeCapabilities?.providerOptions ?? activeProvider.capabilities.providerOptions;
         const mismatch = validateProviderOptionsAgainstDeclaration({
           providerId: candidate.provider,
           model: candidate.model,
@@ -248,17 +195,11 @@ async function runVideoGeneration(
         });
         if (mismatch) {
           warnOnFirstSkip(mismatch);
-          logger.debug(
-            `video-generation candidate skipped (providerOptions): ${candidate.provider}/${candidate.model}`,
-          );
           return mismatch;
         }
       }
 
-      // Guard: skip candidates whose maxDurationSeconds hard cap is below the requested
-      // duration. Only applies when the provider uses a simple max with no explicit
-      // supported-durations list — when a list exists, runtime normalization snaps to the
-      // nearest valid value so skipping is not appropriate.
+      // Explicit duration lists use normalization's nearest-value snapping instead of this cap.
       const supportedDurations = resolveVideoGenerationSupportedDurations({
         provider: activeProvider,
         model: candidate.model,
@@ -267,44 +208,65 @@ async function runVideoGeneration(
       });
       const requestedDuration = params.durationSeconds;
       if (typeof requestedDuration === "number" && Number.isFinite(requestedDuration)) {
-        const { capabilities: durCaps } = resolveVideoGenerationModeCapabilities({
-          provider: activeProvider,
-          model: candidate.model,
-          inputImageCount,
-          inputVideoCount,
-        });
         const maxDuration =
-          durCaps?.maxDurationSeconds ?? activeProvider.capabilities.maxDurationSeconds;
+          modeCapabilities?.maxDurationSeconds ?? activeProvider.capabilities.maxDurationSeconds;
         if (
           !supportedDurations &&
           typeof maxDuration === "number" &&
           // Compare the normalized (rounded) duration, not the raw float, since
-          // resolveVideoGenerationOverrides applies Math.round before sending to the provider.
+          // Normalization applies Math.round before sending to the provider.
           // A request for 4.4s against maxDurationSeconds=4 rounds to 4 and is valid.
           Math.round(requestedDuration) > maxDuration
         ) {
           const error = `${candidate.provider}/${candidate.model} supports at most ${maxDuration}s per video, ${requestedDuration}s requested; skipping`;
           warnOnFirstSkip(error);
-          logger.debug(
-            `video-generation candidate skipped (duration capability): ${candidate.provider}/${candidate.model}`,
-          );
           return error;
         }
       }
 
       return async (attempts): Promise<GenerateVideoRuntimeResult> => {
-        const sanitized = resolveVideoGenerationOverrides({
-          provider: activeProvider,
-          model: candidate.model,
+        const sanitized = resolveMediaGeometryOverrides({
           size: params.size,
           aspectRatio: params.aspectRatio,
           resolution: params.resolution,
-          durationSeconds: params.durationSeconds,
-          audio: params.audio,
-          watermark: params.watermark,
-          inputImageCount,
-          inputVideoCount,
+          capabilities: modeCapabilities,
+          reportUnrecognizedOverrides: true,
+          useAspectRatioForRequestedSize: true,
         });
+        const ignoredOverrides: VideoGenerationIgnoredOverride[] = sanitized.ignoredOverrides;
+        const normalization: VideoGenerationNormalization = sanitized.normalization;
+        let { audio, watermark } = params;
+        if (modeCapabilities && typeof audio === "boolean" && !modeCapabilities.supportsAudio) {
+          ignoredOverrides.push({ key: "audio", value: audio });
+          audio = undefined;
+        }
+        if (
+          modeCapabilities &&
+          typeof watermark === "boolean" &&
+          !modeCapabilities.supportsWatermark
+        ) {
+          ignoredOverrides.push({ key: "watermark", value: watermark });
+          watermark = undefined;
+        }
+        const requestedDurationSeconds = normalizeVideoGenerationDuration({
+          durationSeconds: params.durationSeconds,
+        });
+        const durationSeconds =
+          requestedDurationSeconds !== undefined && supportedDurations
+            ? selectSupportedVideoDuration(requestedDurationSeconds, supportedDurations)
+            : requestedDurationSeconds;
+        if (
+          typeof requestedDurationSeconds === "number" &&
+          typeof durationSeconds === "number" &&
+          requestedDurationSeconds !== durationSeconds
+        ) {
+          normalization.durationSeconds = {
+            requested: requestedDurationSeconds,
+            applied: durationSeconds,
+            ...(supportedDurations?.length ? { supportedValues: supportedDurations } : {}),
+          };
+        }
+        const appliedNormalization = Object.keys(normalization).length ? normalization : undefined;
         const generationRequest: Parameters<typeof provider.generateVideo>[0] & {
           [SUPPORTED_DURATIONS_HINT]?: readonly number[];
         } = {
@@ -317,9 +279,9 @@ async function runVideoGeneration(
           size: sanitized.size,
           aspectRatio: sanitized.aspectRatio,
           resolution: sanitized.resolution,
-          durationSeconds: sanitized.durationSeconds,
-          audio: sanitized.audio,
-          watermark: sanitized.watermark,
+          durationSeconds,
+          audio,
+          watermark,
           inputImages: params.inputImages,
           inputVideos: params.inputVideos,
           inputAudios: params.inputAudios,
@@ -357,12 +319,12 @@ async function runVideoGeneration(
           provider: candidate.provider,
           model: result.model ?? candidate.model,
           attempts,
-          normalization: sanitized.normalization,
-          ignoredOverrides: sanitized.ignoredOverrides,
+          normalization: appliedNormalization,
+          ignoredOverrides,
           metadata: {
             ...result.metadata,
             ...buildMediaGenerationNormalizationMetadata({
-              normalization: sanitized.normalization,
+              normalization: appliedNormalization,
               requestedSizeForDerivedAspectRatio: params.size,
               includeSupportedDurationSeconds: true,
             }),

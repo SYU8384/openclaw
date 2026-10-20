@@ -14,42 +14,28 @@ import {
 } from "./call-events.js";
 import type { FaceTimeCallRegistry } from "./call-lifecycle.js";
 import type { FaceTimeConfig } from "./config.js";
-import {
-  projectFaceTimeNativeAction,
-  type FaceTimeHelperPeer,
-  type FaceTimeHelperSocketServer,
-} from "./helper-rpc.js";
+import { assertFaceTimeNativeAction } from "./helper-results.js";
+import type { FaceTimeHelperPeer, FaceTimeHelperSocketServer } from "./helper-rpc.js";
 import {
   doesFaceTimeCallMatchPendingDial,
   retainFaceTimeDialCallUUID,
   type PendingFaceTimeDial,
 } from "./outbound-call.js";
+import type { createFaceTimeCallControl } from "./runtime-call-control.js";
 import { retainHelperResultPeers } from "./runtime-helper-results.js";
-import {
-  createManagedCall,
-  readCallUUID,
-  updateCallStatus,
-  type ActiveFaceTimeCall,
-} from "./runtime-state.js";
-
-type CallControl = {
-  activateCallTalk(call: ActiveFaceTimeCall, options: { unmute: boolean }): Promise<void>;
-  attemptCarrierHangup(call: ActiveFaceTimeCall, reason: string): Promise<boolean>;
-  closeCall(call: ActiveFaceTimeCall, reason: string): Promise<void>;
-  startCallTalk(call: ActiveFaceTimeCall): Promise<void>;
-};
+import { ActiveFaceTimeCall, updateCallStatus } from "./runtime-state.js";
 
 export function createFaceTimeCallEventHandler(params: {
   calls: FaceTimeCallRegistry<ActiveFaceTimeCall>;
   helper: FaceTimeHelperSocketServer;
   config: FaceTimeConfig;
   logger: RuntimeLogger;
-  callControl: CallControl;
+  callControl: ReturnType<typeof createFaceTimeCallControl>;
   isStopping: () => boolean;
   isDriverInstallPending: () => boolean;
   getPendingDial: () => PendingFaceTimeDial | undefined;
-  clearPendingDial: () => void;
-  persistPendingDial: () => void;
+  clearPendingDial: () => Promise<void>;
+  persistPendingDial: () => Promise<void>;
   outboundCarrierPeers: ReadonlyMap<number, FaceTimeHelperPeer>;
   cancelPendingDial: (pending: PendingFaceTimeDial) => Promise<void>;
 }) {
@@ -72,13 +58,18 @@ export function createFaceTimeCallEventHandler(params: {
     return undefined;
   };
   const canPromotePendingDial = (pending: PendingFaceTimeDial) =>
-    params.getPendingDial() === pending && pending.delivery !== "cancelling";
+    !params.isStopping() &&
+    params.getPendingDial() === pending &&
+    pending.delivery !== "cancelling";
   const authorizePendingDial = async (
     event: FaceTimeCallStatusEvent,
     pending: PendingFaceTimeDial,
   ): Promise<AuthenticatedFaceTimeOwner | undefined> => {
-    retainFaceTimeDialCallUUID(pending, readCallUUID(event));
-    params.persistPendingDial();
+    retainFaceTimeDialCallUUID(pending, event.data.call_uuid);
+    await params.persistPendingDial();
+    if (params.isStopping() || params.getPendingDial() !== pending) {
+      return undefined;
+    }
     const owner =
       pending.delivery === "cancelling"
         ? undefined
@@ -115,14 +106,27 @@ export function createFaceTimeCallEventHandler(params: {
         params.calls.retainAlias(call, alias);
       }
     }
-    call.carrierCallUUIDs.add(String(event.data.call_uuid));
+    call.carrierCallUUIDs.add(event.data.call_uuid);
+  };
+  const retainPendingDial = (call: ActiveFaceTimeCall, pending: PendingFaceTimeDial) => {
+    params.calls.retainAlias(call, pending.dialID);
+    if (pending.proxyIdentifier) {
+      params.calls.retainAlias(call, pending.proxyIdentifier);
+    }
+    for (const alias of pending.callUUIDAliases ?? []) {
+      params.calls.retainAlias(call, alias);
+      call.carrierCallUUIDs.add(alias);
+    }
+    for (const carrierPeer of params.outboundCarrierPeers.values()) {
+      call.carrierPeers.set(carrierPeer.processId, carrierPeer);
+    }
   };
   const answerIncoming = async (
     event: FaceTimeCallStatusEvent,
     owner: AuthenticatedFaceTimeOwner,
     peer?: FaceTimeHelperPeer,
   ) => {
-    const callUUID = readCallUUID(event);
+    const callUUID = event.data.call_uuid;
     if (params.isDriverInstallPending()) {
       params.logger.warn("[facetime] ignored incoming call; audio driver installation is pending");
       return;
@@ -134,7 +138,7 @@ export function createFaceTimeCallEventHandler(params: {
       params.logger.warn("[facetime] ignored incoming call; another FaceTime bridge is active");
       return;
     }
-    const call = createManagedCall({
+    const call = new ActiveFaceTimeCall({
       callUUID,
       phase: "ringing",
       owner,
@@ -160,9 +164,9 @@ export function createFaceTimeCallEventHandler(params: {
         generation,
         action: async () => await params.helper.answerCall(callUUID),
       });
-      projectFaceTimeNativeAction("answer", answerResult);
+      assertFaceTimeNativeAction("answer", answerResult);
       retainHelperResultPeers(call, answerResult);
-      await params.callControl.activateCallTalk(call, { unmute: true });
+      await params.callControl.activateCallTalk(call);
       params.logger.info("[facetime] answered authorized FaceTime call");
     } catch (error) {
       params.logger.warn(`[facetime] failed to answer FaceTime call: ${formatErrorMessage(error)}`);
@@ -181,8 +185,9 @@ export function createFaceTimeCallEventHandler(params: {
     event: FaceTimeCallStatusEvent,
     owner?: AuthenticatedFaceTimeOwner,
     peer?: FaceTimeHelperPeer,
+    pending?: PendingFaceTimeDial,
   ) => {
-    const callUUID = readCallUUID(event);
+    const callUUID = event.data.call_uuid;
     if (params.isDriverInstallPending()) {
       params.logger.warn("[facetime] ignored active call; audio driver installation is pending");
       return;
@@ -197,7 +202,7 @@ export function createFaceTimeCallEventHandler(params: {
         params.logger.warn("[facetime] ignored active call; another FaceTime bridge is active");
         return;
       }
-      call = createManagedCall({
+      call = new ActiveFaceTimeCall({
         callUUID,
         phase: "active",
         owner,
@@ -206,6 +211,9 @@ export function createFaceTimeCallEventHandler(params: {
       });
       params.calls.create(call);
       retainAliases(call, event);
+    }
+    if (pending) {
+      retainPendingDial(call, pending);
     }
     if (peer) {
       call.carrierPeers.set(peer.processId, peer);
@@ -216,7 +224,7 @@ export function createFaceTimeCallEventHandler(params: {
     updateCallStatus(call, event);
     try {
       await params.callControl.startCallTalk(call);
-      await params.callControl.activateCallTalk(call, { unmute: true });
+      await params.callControl.activateCallTalk(call);
       params.logger.info("[facetime] realtime talk session active");
     } catch (error) {
       if (call.lifecycleAbort.signal.aborted || params.calls.active !== call) {
@@ -230,8 +238,9 @@ export function createFaceTimeCallEventHandler(params: {
     if (params.isStopping()) {
       return;
     }
-    const callUUID = readCallUUID(event);
+    const callUUID = event.data.call_uuid;
     const existingCall = resolveEventCall(event);
+    const pending = params.getPendingDial();
     if (existingCall) {
       if (peer) {
         existingCall.carrierPeers.set(peer.processId, peer);
@@ -242,9 +251,18 @@ export function createFaceTimeCallEventHandler(params: {
     const verifiedTransport = isVerifiedFaceTimeTransport(event);
     if (existingCall && !verifiedTransport && !isEndedCall(event)) {
       params.logger.warn(
-        "[facetime] managed call transport lost FaceTime verification; closing fail-closed",
+        "[facetime] managed call transport lost FaceTime verification; closing the call",
       );
       await params.callControl.attemptCarrierHangup(existingCall, "transport-verification-lost");
+      return;
+    }
+    if (
+      pending &&
+      !existingCall &&
+      event.data.is_outgoing !== true &&
+      (isIncomingRingingCall(event) || isActiveCall(event))
+    ) {
+      params.logger.info("[facetime] ignored incoming call; an outbound FaceTime call is pending");
       return;
     }
     if (isIncomingRingingCall(event)) {
@@ -259,7 +277,6 @@ export function createFaceTimeCallEventHandler(params: {
       }
       return;
     }
-    const pending = params.getPendingDial();
     if (isOutgoingRingingCall(event)) {
       if (verifiedTransport && pending && doesFaceTimeCallMatchPendingDial({ event, pending })) {
         const owner = await authorizePendingDial(event, pending);
@@ -268,7 +285,7 @@ export function createFaceTimeCallEventHandler(params: {
         }
         let ringingCall = resolveEventCall(event);
         if (!ringingCall && params.calls.size === 0) {
-          ringingCall = createManagedCall({
+          ringingCall = new ActiveFaceTimeCall({
             callUUID,
             phase: "ringing",
             owner,
@@ -278,13 +295,7 @@ export function createFaceTimeCallEventHandler(params: {
           updateCallStatus(ringingCall, event);
           params.calls.create(ringingCall);
           retainAliases(ringingCall, event);
-          params.calls.retainAlias(ringingCall, pending.dialID);
-          if (pending.proxyIdentifier) {
-            params.calls.retainAlias(ringingCall, pending.proxyIdentifier);
-          }
-          for (const carrierPeer of params.outboundCarrierPeers.values()) {
-            ringingCall.carrierPeers.set(carrierPeer.processId, carrierPeer);
-          }
+          retainPendingDial(ringingCall, pending);
         }
         if (ringingCall) {
           try {
@@ -295,7 +306,7 @@ export function createFaceTimeCallEventHandler(params: {
             });
             ringingCall.lastHelperAction = muteResult;
             retainHelperResultPeers(ringingCall, muteResult);
-            projectFaceTimeNativeAction("safe-mute", muteResult);
+            assertFaceTimeNativeAction("safe-mute", muteResult);
           } catch (error) {
             params.logger.warn(
               `[facetime] outbound ringing safety mute failed: ${formatErrorMessage(error)}`,
@@ -328,59 +339,52 @@ export function createFaceTimeCallEventHandler(params: {
       if (authorizedPending && (!owner || !canPromotePendingDial(authorizedPending))) {
         return;
       }
-      if (authorizedPending && params.calls.active) {
-        params.calls.retainAlias(params.calls.active, callUUID);
+      const pendingCall = authorizedPending && params.calls.get(authorizedPending.dialID);
+      if (pendingCall) {
+        params.calls.retainAlias(pendingCall, callUUID);
       }
       if (!resolveEventCall(event) && !owner) {
         params.logger.info("[facetime] ignored unauthorized active FaceTime call");
         return;
       }
-      await activate(event, owner, peer);
+      await activate(event, owner, peer, authorizedPending);
       if (
         authorizedPending &&
         canPromotePendingDial(authorizedPending) &&
         params.calls.has(callUUID)
       ) {
-        const activeCall = resolveEventCall(event);
-        if (activeCall) {
-          params.calls.retainAlias(activeCall, authorizedPending.dialID);
-          if (authorizedPending.proxyIdentifier) {
-            params.calls.retainAlias(activeCall, authorizedPending.proxyIdentifier);
-          }
-          for (const alias of authorizedPending.callUUIDAliases ?? []) {
-            params.calls.retainAlias(activeCall, alias);
-            activeCall.carrierCallUUIDs.add(alias);
-          }
-        }
-        params.clearPendingDial();
+        await params.clearPendingDial();
       }
       return;
     }
     if (isEndedCall(event)) {
-      if (
+      const clearing =
         event.data.is_outgoing === true &&
         pending &&
         doesFaceTimeCallMatchPendingDial({ event, pending })
-      ) {
-        params.clearPendingDial();
-      }
+          ? params.clearPendingDial()
+          : undefined;
       const endedCall = resolveEventCall(event);
       if (endedCall) {
         if (endedCall.retiredCarrierCallUUIDs.has(callUUID)) {
           params.logger.debug?.(
             "[facetime] ignored ended event for a stale carrier alias while another carrier is current",
           );
+          await clearing;
           return;
         }
+        // Native terminal evidence revokes media immediately, even while SQLite settles.
         endedCall.markCarrierClosed();
-        await params.callControl.closeCall(endedCall, "native-ended");
+        await Promise.all([clearing, params.callControl.closeCall(endedCall, "native-ended")]);
+      } else {
+        await clearing;
       }
       return;
     }
     if (isUnknownCallStatus(event)) {
       const unknownCall = params.calls.get(callUUID);
       if (unknownCall) {
-        params.logger.warn("[facetime] unknown native call status; closing carrier fail-closed");
+        params.logger.warn("[facetime] unknown native call status; closing the carrier");
         await params.callControl.attemptCarrierHangup(unknownCall, "unknown-native-status");
       }
     }

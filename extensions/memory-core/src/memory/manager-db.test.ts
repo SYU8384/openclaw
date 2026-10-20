@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  encodeMemoryEmbedding,
   ensureMemoryIndexSchema,
   loadSqliteVecExtension,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
@@ -23,6 +24,8 @@ import {
   openMemoryDatabaseAtPath,
   resetMemoryDatabase,
 } from "./manager-db.js";
+import { observePublishedSql } from "./manager-publication-observer.test-support.js";
+import { bindSqliteWorkerBackend } from "./manager-publication.worker.js";
 import { waitForMemoryReindexLock } from "./manager-reindex-lock.js";
 
 function ensureTestMemorySchema(db: DatabaseSync, cacheEnabled = true, ftsEnabled = false): void {
@@ -33,17 +36,28 @@ function ensureTestMemorySchema(db: DatabaseSync, cacheEnabled = true, ftsEnable
   });
 }
 
+function readSourceSchema(db: DatabaseSync) {
+  const sql = (table: string) => {
+    const row = db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(table);
+    return typeof row?.sql === "string" ? row.sql : null;
+  };
+  return {
+    fts: sql("memory_index_chunks_fts"),
+    paths: sql("memory_index_paths_fts"),
+    vector: sql("memory_index_chunks_vec"),
+  };
+}
+
 async function expectPathMissing(targetPath: string): Promise<void> {
   await expect(fs.access(targetPath)).rejects.toThrow("ENOENT");
 }
 
 async function publishPreparedMemoryDatabase(
   params: Parameters<typeof publishMemoryDatabaseTables>[0] & {
-    sourceHasVectors: boolean;
     vectorExtensionPath?: string;
   },
 ): Promise<void> {
-  if (params.sourceHasVectors) {
+  if (params.sourceSchema.vector) {
     const loaded = await loadSqliteVecExtension({
       db: params.targetDb,
       extensionPath: params.vectorExtensionPath,
@@ -96,14 +110,19 @@ describe("memory manager database publication", () => {
         INSERT INTO memory_unrelated VALUES (x'00ff80');
         INSERT INTO memory_index_sources (path, source, hash, mtime, size)
           VALUES ('MEMORY.md', 'memory', 'old', 1, 1);
-        INSERT INTO memory_index_chunks VALUES ('chunk', 'MEMORY.md', 'memory', 1, 1, 'old', 'model', 'old text', '[0,1,0]', 1);
-        INSERT INTO memory_index_chunks_fts VALUES ('old text', 'chunk', 'MEMORY.md', 'memory', 'model', 1, 1);
+        INSERT INTO memory_index_chunks
+          (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+          VALUES ('chunk', 'MEMORY.md', 'memory', 1, 1, 'old', 'model', 'old text', x'', 1);
         INSERT INTO memory_index_chunks_vec VALUES ('chunk', '[0,1,0]');
         INSERT INTO memory_index_chunk_recall_metadata VALUES ('chunk', 9, 'old trigger', NULL);
         INSERT INTO memory_index_chunk_provenance VALUES ('chunk', 'owner', 'interactive', 1, NULL);
-        INSERT INTO memory_embedding_cache VALUES ('test', 'model', 'key', 'old', '[0,1,0]', 3, 1);
         INSERT INTO memory_index_meta VALUES ('meta', 'old');
       `);
+      const embedding = encodeMemoryEmbedding([0, 1, 0]);
+      db.prepare("UPDATE memory_index_chunks SET embedding = ? WHERE id = 'chunk'").run(embedding);
+      db.prepare(
+        "INSERT INTO memory_embedding_cache VALUES ('test', 'model', 'key', 'old', ?, 3, 1)",
+      ).run(embedding);
       const schema = () =>
         db.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name").all();
       const beforeSchema = schema();
@@ -129,7 +148,7 @@ describe("memory manager database publication", () => {
         });
       }
       const resetRevision = readMemoryDatabaseRevision(db);
-      expect(resetRevision).toBeGreaterThan(revision);
+      expect(resetRevision).toBe(revision + 1);
       expect(await resetMemoryDatabase({ targetDb: db, dbPath, workspaceDir: fixtureRoot })).toBe(
         false,
       );
@@ -154,7 +173,7 @@ describe("memory manager database publication", () => {
     }
   });
 
-  it("lazily adds recall metadata storage before publishing to an existing database", async () => {
+  it("admits legacy recall metadata before publishing in one transaction", async () => {
     const targetPath = path.join(fixtureRoot, "target.sqlite");
     const sourcePath = path.join(fixtureRoot, "source.sqlite");
     const targetDb = new DatabaseSync(targetPath);
@@ -167,9 +186,10 @@ describe("memory manager database publication", () => {
           hash TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, UNIQUE (path, source)
         ) STRICT;
         CREATE TABLE memory_index_chunks (
-          id TEXT PRIMARY KEY, path TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'memory',
+          chunk_rowid INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE,
+          path TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'memory',
           start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, hash TEXT NOT NULL,
-          model TEXT NOT NULL, text TEXT NOT NULL, embedding TEXT NOT NULL,
+          model TEXT NOT NULL, text TEXT NOT NULL, embedding BLOB NOT NULL,
           updated_at INTEGER NOT NULL
         ) STRICT;
         CREATE TABLE memory_index_state (
@@ -177,6 +197,7 @@ describe("memory manager database publication", () => {
         ) STRICT;
         INSERT INTO memory_index_state (id, revision) VALUES (1, 0);
       `);
+      ensureTestMemorySchema(targetDb, false);
       ensureTestMemorySchema(sourceDb, false);
       sourceDb
         .prepare(
@@ -184,22 +205,40 @@ describe("memory manager database publication", () => {
            (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run("new", "MEMORY.md", "memory", 1, 1, "hash", "model", "body", "[]", 1);
+        .run(
+          "new",
+          "MEMORY.md",
+          "memory",
+          1,
+          1,
+          "hash",
+          "model",
+          "body",
+          encodeMemoryEmbedding([]),
+          1,
+        );
       sourceDb
         .prepare(
           `INSERT INTO memory_index_chunk_recall_metadata
            (chunk_id, importance, triggers) VALUES (?, ?, ?)`,
         )
         .run("new", 9, "when flying");
+      const sourceSchema = readSourceSchema(sourceDb);
       sourceDb.close();
 
-      await publishPreparedMemoryDatabase({
-        targetDb,
-        sourcePath,
-        sourceHasVectors: false,
-        metaKey: "meta",
-        expectedRevision: 0,
-      });
+      const observed = observePublishedSql(targetDb);
+      try {
+        await publishPreparedMemoryDatabase({
+          targetDb,
+          sourcePath,
+          sourceSchema,
+          metaKey: "meta",
+          expectedRevision: 0,
+        });
+        expect(observed.calls().filter(({ sql }) => /^BEGIN\b/i.test(sql))).toHaveLength(1);
+      } finally {
+        observed.restore();
+      }
 
       expect(
         targetDb
@@ -226,12 +265,13 @@ describe("memory manager database publication", () => {
       targetDb
         .prepare("INSERT INTO memory_index_chunks_vec (id, embedding) VALUES (?, ?)")
         .run("stale", "[]");
+      const sourceSchema = readSourceSchema(sourceDb);
       sourceDb.close();
 
       await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
-        sourceHasVectors: false,
+        sourceSchema,
         metaKey: "memory_index_meta",
         expectedRevision: readMemoryDatabaseRevision(targetDb),
       });
@@ -251,7 +291,7 @@ describe("memory manager database publication", () => {
     }
   });
 
-  it("publishes the canonical path FTS table and preserves its source triggers", async () => {
+  it("publishes stable path and chunk identities and restores FTS maintenance", async () => {
     const targetPath = path.join(fixtureRoot, "target.sqlite");
     const sourcePath = path.join(fixtureRoot, "source.sqlite");
     const targetDb = new DatabaseSync(targetPath);
@@ -264,6 +304,18 @@ describe("memory manager database publication", () => {
           "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
         )
         .run("memory/stale.md", "memory", "stale", 1, 1);
+      const embedding = encodeMemoryEmbedding([0.1234567890123456, -0.5]);
+      const insertChunk = (db: DatabaseSync, rowid: number, id: string, text: string) => {
+        db.prepare(
+          `INSERT INTO memory_index_chunks
+             (chunk_rowid, id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+           VALUES (?, ?, ?, 'memory', 1, 1, ?, 'model', ?, ?, 1)`,
+        ).run(rowid, id, `memory/${id}.md`, id, text, embedding);
+        db.prepare(`INSERT INTO memory_index_chunk_provenance
+          (chunk_id, origin_class, session_kind, observed_at)
+          VALUES (?, 'owner', 'interactive', 1)`).run(id);
+      };
+      insertChunk(targetDb, 7, "stale", "Old violetmarker");
       targetDb.exec(`
         DROP TRIGGER memory_index_paths_fts_after_delete;
         CREATE TRIGGER memory_index_paths_fts_after_delete
@@ -271,22 +323,45 @@ describe("memory manager database publication", () => {
         BEGIN
           SELECT RAISE(ABORT, 'path FTS trigger fired during bulk publish');
         END;
+        DROP TRIGGER memory_index_chunks_fts_after_delete;
+        CREATE TRIGGER memory_index_chunks_fts_after_delete
+        AFTER DELETE ON memory_index_chunks
+        BEGIN
+          SELECT RAISE(ABORT, 'body FTS trigger fired during bulk publish');
+        END;
       `);
       sourceDb
         .prepare(
           "INSERT INTO memory_index_sources (id, path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .run(42, "memory/replacement.md", "memory", "replacement", 2, 2);
+      insertChunk(sourceDb, 84, "replacement", "New ambermarker");
       const expectedRevision = readMemoryDatabaseRevision(targetDb);
+      const sourceSchema = readSourceSchema(sourceDb);
       sourceDb.close();
 
-      await publishPreparedMemoryDatabase({
-        targetDb,
-        sourcePath,
-        sourceHasVectors: false,
-        metaKey: "meta",
-        expectedRevision,
-      });
+      const observed = observePublishedSql(targetDb);
+      try {
+        await publishPreparedMemoryDatabase({
+          targetDb,
+          sourcePath,
+          sourceSchema,
+          metaKey: "meta",
+          expectedRevision,
+        });
+        expect
+          .soft(observed.calls().filter(({ sql }) => /memory_reindex\.sqlite_master/i.test(sql)))
+          .toEqual([]);
+        expect
+          .soft(
+            observed
+              .calls()
+              .filter(({ sql }) => /^\s*DELETE FROM memory_index_chunks_fts\b/i.test(sql)),
+          )
+          .toEqual([]);
+      } finally {
+        observed.restore();
+      }
 
       expect(targetDb.prepare("SELECT path, source FROM memory_index_paths_fts").all()).toEqual([
         { path: "memory/replacement.md", source: "memory" },
@@ -297,6 +372,26 @@ describe("memory manager database publication", () => {
       expect(targetDb.prepare("SELECT rowid, path FROM memory_index_paths_fts").all()).toEqual([
         { rowid: 42, path: "memory/replacement.md" },
       ]);
+      expect(
+        targetDb.prepare("SELECT chunk_rowid, id, embedding FROM memory_index_chunks").all(),
+      ).toEqual([
+        {
+          chunk_rowid: 84,
+          id: "replacement",
+          embedding,
+        },
+      ]);
+      expect(targetDb.prepare("SELECT rowid, id FROM memory_index_chunks_fts").all()).toEqual([
+        { rowid: 84, id: "replacement" },
+      ]);
+      const bodyMatches = (query: string) =>
+        targetDb
+          .prepare(
+            "SELECT id FROM memory_index_chunks_fts WHERE memory_index_chunks_fts MATCH ? ORDER BY id",
+          )
+          .all(query);
+      expect(bodyMatches("ambermarker")).toEqual([{ id: "replacement" }]);
+      expect(bodyMatches("violetmarker")).toEqual([]);
       expect(
         targetDb
           .prepare("SELECT path FROM memory_index_paths_fts WHERE memory_index_paths_fts MATCH ?")
@@ -319,6 +414,14 @@ describe("memory manager database publication", () => {
           "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
         )
         .run("memory/after-publish.md", "memory", "after", 3, 3);
+      insertChunk(targetDb, 85, "after-publish", "Fresh ambermarker");
+      expect(bodyMatches("ambermarker")).toEqual([{ id: "after-publish" }, { id: "replacement" }]);
+      targetDb
+        .prepare("UPDATE memory_index_chunks SET text = ? WHERE id = ?")
+        .run("Updated saffronmarker", "after-publish");
+      targetDb.prepare("DELETE FROM memory_index_chunks WHERE id = ?").run("replacement");
+      expect(bodyMatches("ambermarker")).toEqual([]);
+      expect(bodyMatches("saffronmarker")).toEqual([{ id: "after-publish" }]);
       expect(
         targetDb
           .prepare("SELECT path FROM memory_index_paths_fts ORDER BY path")
@@ -342,7 +445,7 @@ describe("memory manager database publication", () => {
     }
   });
 
-  it("removes path FTS triggers when the shadow has FTS disabled", async () => {
+  it("removes FTS tables and triggers when the shadow has FTS disabled", async () => {
     const targetPath = path.join(fixtureRoot, "target.sqlite");
     const sourcePath = path.join(fixtureRoot, "source.sqlite");
     const targetDb = new DatabaseSync(targetPath);
@@ -351,12 +454,13 @@ describe("memory manager database publication", () => {
       ensureTestMemorySchema(targetDb, true, true);
       ensureTestMemorySchema(sourceDb);
       const expectedRevision = readMemoryDatabaseRevision(targetDb);
+      const sourceSchema = readSourceSchema(sourceDb);
       sourceDb.close();
 
       await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
-        sourceHasVectors: false,
+        sourceSchema,
         metaKey: "meta",
         expectedRevision,
       });
@@ -364,14 +468,14 @@ describe("memory manager database publication", () => {
       expect(
         targetDb
           .prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_index_paths_fts'",
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('memory_index_paths_fts', 'memory_index_chunks_fts')",
           )
-          .get(),
-      ).toBeUndefined();
+          .all(),
+      ).toEqual([]);
       expect(
         targetDb
           .prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'memory_index_paths_fts_after_%'",
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND (name LIKE 'memory_index_paths_fts_after_%' OR name LIKE 'memory_index_chunks_fts_after_%')",
           )
           .all(),
       ).toEqual([]);
@@ -381,6 +485,11 @@ describe("memory manager database publication", () => {
             "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
           )
           .run("memory/after-disabled-publish.md", "memory", "after", 1, 1),
+      ).not.toThrow();
+      expect(() =>
+        targetDb.exec(`INSERT INTO memory_index_chunks
+          (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
+          VALUES ('after', 'memory/after-disabled-publish.md', 'memory', 1, 1, 'after', 'fts-only', 'after', x'', 1)`),
       ).not.toThrow();
     } finally {
       try {
@@ -411,12 +520,13 @@ describe("memory manager database publication", () => {
       sourceDb
         .prepare("INSERT INTO memory_index_chunks_vec (id, embedding) VALUES (?, ?)")
         .run("vector", JSON.stringify([0, 1, 0]));
+      const sourceSchema = readSourceSchema(sourceDb);
       sourceDb.close();
 
       await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
-        sourceHasVectors: true,
+        sourceSchema,
         metaKey: "memory_index_meta",
         expectedRevision: readMemoryDatabaseRevision(targetDb),
         vectorExtensionPath: sourceVector.extensionPath,
@@ -425,6 +535,7 @@ describe("memory manager database publication", () => {
       expect(targetDb.prepare("SELECT id FROM memory_index_chunks_vec").all()).toEqual([
         { id: "vector" },
       ]);
+      expect(readSourceSchema(targetDb).vector).toBe(sourceSchema.vector);
     } finally {
       try {
         sourceDb.close();
@@ -446,26 +557,44 @@ describe("memory manager database publication", () => {
         .prepare(
           "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
         )
-        .run("memory.md", "memory", "published", 1, 1);
+        .run("memory.md", "sessions", "published", 1, 1);
       sourceDb
         .prepare(
           "INSERT INTO memory_index_sources (path, source, hash, mtime, size) VALUES (?, ?, ?, ?, ?)",
         )
-        .run("memory.md", "memory", "shadow", 1, 1);
+        .run("memory.md", "sessions", "shadow", 1, 1);
       const expectedRevision = readMemoryDatabaseRevision(targetDb);
+      const sourceSchema = readSourceSchema(sourceDb);
       sourceDb.close();
 
       concurrentDb = new DatabaseSync(targetPath);
-      concurrentDb
-        .prepare("UPDATE memory_index_sources SET hash = ? WHERE path = ? AND source = ?")
-        .run("newer", "memory.md", "memory");
+      const publisher = bindSqliteWorkerBackend(
+        { kind: "agent" },
+        { databasePath: targetPath, database: concurrentDb, admit: () => undefined },
+      );
+      try {
+        expect(
+          publisher.execute({
+            type: "source.refresh",
+            input: {
+              path: "memory.md",
+              expectedHash: "published",
+              hash: "newer",
+              mtime: 2,
+              size: 2,
+            },
+          }),
+        ).toMatchObject({ ok: true, value: true });
+      } finally {
+        publisher.close();
+      }
       concurrentDb.close();
       concurrentDb = undefined;
 
       const publication = publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
-        sourceHasVectors: false,
+        sourceSchema,
         metaKey: "memory_index_meta",
         expectedRevision,
       });
@@ -474,7 +603,7 @@ describe("memory manager database publication", () => {
       expect(
         targetDb
           .prepare("SELECT hash FROM memory_index_sources WHERE path = ? AND source = ?")
-          .get("memory.md", "memory"),
+          .get("memory.md", "sessions"),
       ).toEqual({ hash: "newer" });
     } finally {
       try {
@@ -501,20 +630,21 @@ describe("memory manager database publication", () => {
              provider, model, provider_key, hash, embedding, dims, updated_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run("test", "model", "key", "live-hash", "[]", 0, 1);
+        .run("test", "model", "key", "live-hash", encodeMemoryEmbedding([]), 0, 1);
       sourceDb
         .prepare(
           `INSERT INTO memory_embedding_cache (
              provider, model, provider_key, hash, embedding, dims, updated_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run("test", "model", "key", "shadow-hash", "[1]", 1, 2);
+        .run("test", "model", "key", "shadow-hash", encodeMemoryEmbedding([1]), 1, 2);
+      const sourceSchema = readSourceSchema(sourceDb);
       sourceDb.close();
 
       await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
-        sourceHasVectors: false,
+        sourceSchema,
         metaKey: "memory_index_meta",
         expectedRevision: readMemoryDatabaseRevision(targetDb),
       });

@@ -99,6 +99,7 @@ function useScriptedClaudeCliBackend() {
 function createClaudeCliFollowupRun() {
   const followupRun = createFollowupRun();
   followupRun.run.agentId = "agent";
+  followupRun.run.sessionKey = "agent:agent:main";
   followupRun.run.provider = "claude-cli";
   followupRun.run.model = "claude-opus-4-6";
   followupRun.run.skillsSnapshot = { prompt: "", skills: [], version: 0 };
@@ -107,9 +108,10 @@ function createClaudeCliFollowupRun() {
 }
 
 function createTurnParams(opts: GetReplyOptions, blockStreamingEnabled: boolean) {
+  const followupRun = createClaudeCliFollowupRun();
   return {
     commandBody: "hi",
-    followupRun: createClaudeCliFollowupRun(),
+    followupRun,
     sessionCtx: { Provider: "telegram", MessageSid: "msg" } as unknown as TemplateContext,
     opts,
     typingSignals: createMockTypingSignaler(),
@@ -120,9 +122,8 @@ function createTurnParams(opts: GetReplyOptions, blockStreamingEnabled: boolean)
     shouldEmitToolResult: () => true,
     shouldEmitToolOutput: () => false,
     pendingToolTasks: new Set<Promise<void>>(),
-    resetSessionAfterRoleOrderingConflict: async () => false,
     isHeartbeat: false,
-    sessionKey: "main",
+    sessionKey: followupRun.run.sessionKey,
     getActiveSessionEntry: () => undefined,
     resolvedVerboseLevel: "off" as const,
   };
@@ -336,57 +337,63 @@ describe("executeAgentTurn: CLI durable commentary", () => {
     },
   );
 
-  it.each([
-    { text: "NO_REPLY", silent: true },
-    { text: '{"action":"NO_REPLY"}', silent: true },
-    { text: "An ordinary caption.", silent: false },
-  ])("keeps parsed CLI silence through normalization: $text", async ({ text, silent }) => {
-    useClaudeCliFallback();
-    const { createBlockReplyDeliveryHandler } =
-      await vi.importActual<typeof import("./reply-delivery.js")>("./reply-delivery.js");
-    const normalizeMediaPaths = vi.fn(async (payload: ReplyPayload) => {
-      expect(payload.mediaUrls).toEqual(["https://example.invalid/attachment.txt"]);
-      return copyReplyPayloadMetadata(payload, {
-        ...payload,
-        text: "Attachment preparation failed.",
-        mediaUrl: undefined,
-        mediaUrls: undefined,
+  it.each(
+    [false, true].flatMap((completed) =>
+      ["NO_REPLY", '{"action":"NO_REPLY"}', '"NO_REPLY"', "NO_REPLY.", "An ordinary caption."].map(
+        (text) => ({ text, completed }),
+      ),
+    ),
+  )(
+    "keeps prepared CLI payload facts through normalization (completed=$completed): $text",
+    async ({ text, completed }) => {
+      useClaudeCliFallback();
+      const { createBlockReplyDeliveryHandler } =
+        await vi.importActual<typeof import("./reply-delivery.js")>("./reply-delivery.js");
+      const normalizeMediaPaths = vi.fn(async (payload: ReplyPayload) => {
+        expect(payload.mediaUrls).toEqual(["https://example.invalid/attachment.txt"]);
+        return copyReplyPayloadMetadata(payload, {
+          ...payload,
+          text: "Attachment preparation failed.",
+          mediaUrl: undefined,
+          mediaUrls: undefined,
+        });
       });
-    });
-    state.createBlockReplyDeliveryHandlerMock.mockImplementationOnce(
-      (params: Parameters<typeof createBlockReplyDeliveryHandler>[0]) =>
-        createBlockReplyDeliveryHandler({ ...params, normalizeMediaPaths }),
-    );
-    state.runCliAgentMock.mockImplementationOnce(async (params: { runId: string }) => {
-      const { emitAgentEvent } = await import("../../infra/agent-events.js");
-      emitAgentEvent({
-        runId: params.runId,
-        stream: "item",
-        data: {
-          kind: "preamble",
-          itemId: "commentary-silence",
-          progressText: `${text}\nMEDIA:https://example.invalid/attachment.txt`,
-        },
+      state.createBlockReplyDeliveryHandlerMock.mockImplementationOnce(
+        (params: Parameters<typeof createBlockReplyDeliveryHandler>[0]) =>
+          createBlockReplyDeliveryHandler({ ...params, normalizeMediaPaths }),
+      );
+      state.runCliAgentMock.mockImplementationOnce(async (params: { runId: string }) => {
+        const { emitAgentEvent } = await import("../../infra/agent-events.js");
+        emitAgentEvent({
+          runId: params.runId,
+          stream: completed ? "assistant" : "item",
+          data: completed
+            ? {
+                completedText: `${text}\nMEDIA:https://example.invalid/attachment.txt`,
+                assistantMessageIndex: 0,
+              }
+            : {
+                kind: "preamble",
+                itemId: "commentary-silence",
+                progressText: `${text}\nMEDIA:https://example.invalid/attachment.txt`,
+              },
+        });
+        return { payloads: [{ text: "Final answer." }], meta: {} };
       });
-      return { payloads: [{ text: "Final answer." }], meta: {} };
-    });
-    const onPreparedBlockReply = vi.fn<NonNullable<GetReplyOptions["onPreparedBlockReply"]>>(
-      async () => undefined,
-    );
-    const executeAgentTurn = await getExecuteAgentTurnForTest();
+      const onPreparedBlockReply = vi.fn<NonNullable<GetReplyOptions["onPreparedBlockReply"]>>(
+        async () => undefined,
+      );
+      const executeAgentTurn = await getExecuteAgentTurnForTest();
 
-    await executeAgentTurn(createTurnParams({ onPreparedBlockReply }, true));
+      await executeAgentTurn(createTurnParams({ onPreparedBlockReply }, !completed));
 
-    expect(normalizeMediaPaths).toHaveBeenCalledOnce();
-    if (silent) {
-      expect(onPreparedBlockReply).not.toHaveBeenCalled();
-    } else {
+      expect(normalizeMediaPaths).toHaveBeenCalledOnce();
       expect(onPreparedBlockReply).toHaveBeenCalledOnce();
       expect(onPreparedBlockReply.mock.calls[0]?.[0].payload.text).toBe(
         "Attachment preparation failed.",
       );
-    }
-  });
+    },
+  );
 
   it("delivers commentary payloads without block streaming", async () => {
     useClaudeCliFallback();

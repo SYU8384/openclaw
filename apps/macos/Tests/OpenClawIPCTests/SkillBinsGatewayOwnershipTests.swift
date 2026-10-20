@@ -4,6 +4,7 @@ import OpenClawKit
 import Testing
 @testable import OpenClaw
 
+@Suite(.testWaitLimit)
 @MainActor
 struct SkillBinsGatewayOwnershipTests {
     @Test(
@@ -56,13 +57,13 @@ struct SkillBinsGatewayOwnershipTests {
             try #require(ExecApprovalEvaluator.isSkillAutoAllowed(resolutions, trustedBinsByName: first))
             #expect(statusReads.value.count == 1)
             let resolvedPath = try #require(resolutions.first?.resolvedRealPath ?? resolutions.first?.resolvedPath)
-            _ = try Self.updateAgentFixture(agentId: "skill-trust-proof") { entry in
+            try await Self.updateAgentFixture(agentId: "skill-trust-proof") { entry in
                 entry.security = authorizationKind == "full" ? .full : .allowlist
                 entry.ask = .off
                 entry.askFallback = authorizationKind == "fallback" ? .allowlist : .deny
                 entry.autoAllowSkills = true
                 entry.allowlist = authorizationKind == "manual" ? [ExecAllowlistEntry(pattern: resolvedPath)] : []
-            }.get()
+            }
             let evaluation = await ExecApprovalEvaluator.evaluate(
                 command: command,
                 rawCommand: nil,
@@ -80,7 +81,7 @@ struct SkillBinsGatewayOwnershipTests {
                     persistAllowlist: false)
             }
             let capturedCommit = commit()
-            _ = try ExecApprovalsStore.commitExecution(capturedCommit).get()
+            try await ExecApprovalsStore.commitExecution(capturedCommit).get()
 
             if replaceGateway {
                 selectedURL.withValue { $0 = URL(string: "ws://127.0.0.1:49346/")! }
@@ -103,12 +104,12 @@ struct SkillBinsGatewayOwnershipTests {
                 #expect(execution.preflightError != nil)
             }
             #expect(evaluation.skillAllow == !replaceGateway)
-            let committed = switch ExecApprovalsStore.commitExecution(commit()) {
+            let committed = switch await ExecApprovalsStore.commitExecution(commit()) {
             case .success: true
             case .failure: false
             }
             #expect(committed == executionAllowed)
-            let capturedCommitAccepted = switch ExecApprovalsStore.commitExecution(capturedCommit) {
+            let capturedCommitAccepted = switch await ExecApprovalsStore.commitExecution(capturedCommit) {
             case .success: true
             case .failure: false
             }
@@ -121,11 +122,11 @@ struct SkillBinsGatewayOwnershipTests {
                 let refreshed = await cache.current(force: true)?.trustByName ?? [:]
                 #expect(!ExecApprovalEvaluator.isSkillAutoAllowed(resolutions, trustedBinsByName: refreshed))
             } else if authorizationKind == "skill" {
-                _ = try Self.updateAgentFixture(agentId: "skill-trust-proof") { entry in
+                try await Self.updateAgentFixture(agentId: "skill-trust-proof") { entry in
                     entry.autoAllowSkills = nil
-                }.get()
+                }
                 try #require(evaluation.skillAllow)
-                let revoked = switch ExecApprovalsStore.commitExecution(capturedCommit) {
+                let revoked = switch await ExecApprovalsStore.commitExecution(capturedCommit) {
                 case .failure(.unavailable): true
                 case .success, .failure: false
                 }
@@ -138,31 +139,20 @@ struct SkillBinsGatewayOwnershipTests {
         await gateway.shutdown()
     }
 
-    private enum FixtureError: Error { case saveRejected }
-
     private static func updateAgentFixture(
         agentId: String,
-        mutate: (inout ExecApprovalsAgent) -> Void) -> Result<Void, FixtureError>
+        mutate: (inout ExecApprovalsAgent) -> Void) async throws
     {
-        let stateDirectoryURL = ExecApprovalsStore.databaseURL()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        do {
-            try ExecApprovalsSQLiteStore.withImmediateTransaction(stateDirectoryURL: stateDirectoryURL) { record in
-                var file = record?.document ?? ExecApprovalsFile(version: 1, socket: nil, defaults: nil, agents: [:])
-                var agents = file.agents ?? [:]
-                var agent = agents[agentId] ?? ExecApprovalsAgent()
-                mutate(&agent)
-                agents[agentId] = agent
-                file.agents = agents
-                return ExecApprovalsSQLiteMutation(
-                    value: (),
-                    documentToWrite: ExecApprovalsStore.normalizeIncoming(file))
-            }
-        } catch {
-            return .failure(.saveRejected)
-        }
-        return .success(())
+        let root = ExecApprovalsStore.stateDirURL()
+        let current = try await NativeExecPolicyOwner.snapshot(stateDirectory: root)
+        var file = current.file
+        var agents = file.agents ?? [:]
+        var agent = agents[agentId] ?? ExecApprovalsAgent()
+        mutate(&agent)
+        agents[agentId] = agent
+        file.agents = agents
+        _ = try await NativeExecPolicyOwner.replace(file: file, baseHash: current.hash, stateDirectory: root)
+        try ExecApprovalsSocketTestSupport.seedLocalCredentials(in: root)
     }
 
     private nonisolated static func report(bins: [String]) -> SkillsStatusReport {
@@ -231,6 +221,7 @@ extension SkillBinsGatewayOwnershipTests {
         let cache = SkillBinsCache(gateway: gateway)
         let executor = SkillCachePublicationExecutor()
         let entered = LockIsolated(false)
+        let enteredSignal = AsyncTestSignal()
         let release = DispatchSemaphore(value: 0)
         var blocked: Task<Bool, Never>?
         var refresh: Task<SkillBinsCache.Snapshot?, Never>?
@@ -238,11 +229,12 @@ extension SkillBinsGatewayOwnershipTests {
             let first = try #require(await cache.current())
             try #require(first.bins == ["true"])
             refresh = Task.detached(executorPreference: executor) { await cache.current(force: true) }
-            try await Self.waitForRetentionStage { pending.value != nil && executor.isIdle }
+            try await TestWait
+                .state("held skill refresh on idle executor") { pending.value != nil && executor.isIdle }
             blocked = Task.detached(executorPreference: SkillCachePublicationExecutor()) {
-                await holdSkillCacheActor(cache, entered: entered, release: release)
+                await holdSkillCacheActor(cache, entered: entered, enteredSignal: enteredSignal, release: release)
             }
-            try await Self.waitForRetentionStage { entered.value }
+            try await enteredSignal.wait("occupied skill cache actor") { entered.value }
             executor.pause()
             let (socket, id) = try #require(pending.value)
             let receiveCount = socket.snapshotCallbackReceiveCount()
@@ -250,7 +242,7 @@ extension SkillBinsGatewayOwnershipTests {
             let report = try #require(String(data: payload, encoding: .utf8))
             socket.emitReceiveSuccess(.data(Data(
                 #"{"type":"res","id":"\#(id)","ok":true,"payload":\#(report)}"#.utf8)))
-            try await Self.waitForRetentionStage {
+            try await TestWait.state("queued skill publication after response") {
                 executor.hasQueuedJobs && socket.snapshotCallbackReceiveCount() > receiveCount
             }
             // Finish the validated response while the receiving cache actor is occupied.
@@ -291,24 +283,19 @@ extension SkillBinsGatewayOwnershipTests {
         }
         await gateway.shutdown()
     }
-
-    private static func waitForRetentionStage(_ predicate: () -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(2)
-        while !predicate(), ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(1))
-        }
-        try #require(predicate())
-    }
 }
 
 private func holdSkillCacheActor(
     _ cache: isolated SkillBinsCache,
     entered: LockIsolated<Bool>,
+    enteredSignal: AsyncTestSignal,
     release: DispatchSemaphore) -> Bool
 {
     cache.assertIsolated()
     entered.withValue { $0 = true }
-    return release.wait(timeout: .now() + 5) == .success
+    enteredSignal.notify()
+    release.wait()
+    return true
 }
 
 private final class SkillCachePublicationExecutor: TaskExecutor {

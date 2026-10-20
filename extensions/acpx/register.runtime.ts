@@ -5,6 +5,7 @@
 import {
   getAcpRuntimeBackend,
   registerAcpRuntimeBackend,
+  requireAcpRuntimeBackend,
   unregisterAcpRuntimeBackend,
 } from "openclaw/plugin-sdk/acp-runtime-backend";
 import type { OpenClawPluginService, OpenClawPluginServiceContext } from "openclaw/plugin-sdk/core";
@@ -55,6 +56,7 @@ async function startRealService(
     return await state.startPromise;
   }
   const ctx = state.ctx;
+  let starting = true;
   state.startPromise = (async () => {
     let publishedRuntime: CompleteAcpRuntime | null = null;
     const { createAcpxRuntimeService: createAcpxRuntimeServiceLocal } = await loadServiceModule();
@@ -85,14 +87,19 @@ async function startRealService(
           // Publication is a synchronous compare-and-replace: another plugin
           // generation cannot be adopted between the ownership check and write.
           if (state.published) {
-            registerAcpRuntimeBackend({ id: ACPX_BACKEND_ID, ...backend });
+            const { healthy } = backend;
+            registerAcpRuntimeBackend({
+              id: ACPX_BACKEND_ID,
+              ...backend,
+              runtime: deferredRuntime,
+              // The facade can accept callers while they share the bounded startup probe.
+              ...(healthy ? { healthy: () => starting || healthy() } : {}),
+            });
           }
           publishedRuntime = backend.runtime;
-          state.ownedRuntime = backend.runtime;
         },
-        retract(runtime) {
-          unregisterOwnedRuntime(runtime);
-        },
+        // The outer service owns the stable facade and retracts it before inner cleanup.
+        retract() {},
       },
     });
     state.realService = service;
@@ -103,13 +110,15 @@ async function startRealService(
     if (!publishedRuntime) {
       throw new Error("ACPX runtime service did not register an ACP backend");
     }
-    if (state.published && getAcpRuntimeBackend(ACPX_BACKEND_ID)?.runtime !== publishedRuntime) {
+    if (state.published && getAcpRuntimeBackend(ACPX_BACKEND_ID)?.runtime !== deferredRuntime) {
       throw new Error("ACPX runtime service lost registry ownership during activation");
     }
     // Registry publication intentionally precedes the startup probe, but callers
     // must keep sharing the start promise until the inner service is fully ready.
     return publishedRuntime;
-  })();
+  })().finally(() => {
+    starting = false;
+  });
   try {
     return await state.startPromise;
   } catch (error) {
@@ -125,13 +134,18 @@ function createDeferredRuntime(
   state: DeferredServiceState,
   lifecycleRevision: number,
 ): CompleteAcpRuntime {
-  const deferredRuntime: CompleteAcpRuntime = createLazyAcpRuntimeProxy(
-    (): Promise<CompleteAcpRuntime> => startRealService(state, lifecycleRevision, deferredRuntime),
-  );
+  const deferredRuntime: CompleteAcpRuntime = {
+    ...createLazyAcpRuntimeProxy(() => startRealService(state, lifecycleRevision, deferredRuntime)),
+    async ensureSession(input) {
+      const runtime = await startRealService(state, lifecycleRevision, deferredRuntime);
+      // Recheck the published health after startup; doctor must remain available for recovery.
+      requireAcpRuntimeBackend(ACPX_BACKEND_ID);
+      return await runtime.ensureSession(input);
+    },
+  };
   return deferredRuntime;
 }
 
-/** Creates the plugin service that registers ACPX as an ACP runtime backend. */
 export function createAcpxRuntimeService(
   params: CreateAcpxRuntimeServiceParams = {},
 ): OpenClawPluginService & {

@@ -14,9 +14,8 @@ describe("voice-call gateway continue operation store", () => {
     });
 
     const started = store.start({
-      callId: "call-1",
       rt: {
-        config: {},
+        config: { transcriptTimeoutMs: Number.MAX_SAFE_INTEGER },
       } as never,
       run: async () => await new Promise(() => {}),
     });

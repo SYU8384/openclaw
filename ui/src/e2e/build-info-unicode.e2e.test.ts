@@ -60,7 +60,10 @@ function containsBrokenSurrogate(value: string): boolean {
 async function openBuildDetails(page: Page) {
   const sidebar = page.locator("openclaw-app-sidebar");
   await sidebar.getByRole("button", { name: /^Identity and app menu for / }).click();
-  const buildLink = sidebar.getByRole("link", { name: "Control UI build details", exact: true });
+  const buildLink = sidebar.getByRole("menuitem", {
+    name: "Control UI build details",
+    exact: true,
+  });
   await buildLink.waitFor();
   const compactText = (await buildLink.textContent()) ?? "";
   expect(compactText).toContain(`${COMPACT_BRANCH}@0123456`);
@@ -68,8 +71,12 @@ async function openBuildDetails(page: Page) {
   expect(containsBrokenSurrogate(compactText)).toBe(false);
 
   await buildLink.hover();
-  const tooltip = sidebar.locator("openclaw-sidebar-build-chip openclaw-tooltip wa-tooltip");
-  await expect.poll(() => tooltip.evaluate((element) => element.hasAttribute("open"))).toBe(true);
+  const tooltip = sidebar.locator(
+    "openclaw-sidebar-build-chip openclaw-tooltip .tooltip-surface[popover]",
+  );
+  await expect
+    .poll(() => tooltip.evaluate((element) => element.matches(":popover-open")))
+    .toBe(true);
   const buildLinkHandle = await buildLink.elementHandle();
   if (!buildLinkHandle) {
     throw new Error("Expected the identity-menu build link to be attached");
@@ -77,7 +84,7 @@ async function openBuildDetails(page: Page) {
   const afterHideMarker = "data-openclaw-test-after-hide";
   await tooltip.evaluate((element, marker) => {
     element.removeAttribute(marker);
-    element.addEventListener("wa-after-hide", () => element.setAttribute(marker, ""), {
+    element.addEventListener("overlay-after-hide", () => element.setAttribute(marker, ""), {
       once: true,
     });
   }, afterHideMarker);

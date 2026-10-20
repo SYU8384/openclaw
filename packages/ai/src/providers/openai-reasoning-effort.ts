@@ -26,7 +26,7 @@ const GPT_5_REASONING_EFFORTS = ["minimal", "low", "medium", "high"] as const;
 const GPT_51_REASONING_EFFORTS = ["none", "low", "medium", "high"] as const;
 const GPT_52_REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh"] as const;
 const GPT_56_REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
-const GPT_6_ASTRA_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+const GPT_6_MANDATORY_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const GPT_CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 const GPT_PRO_REASONING_EFFORTS = ["medium", "high", "xhigh"] as const;
 const GPT_5_PRO_REASONING_EFFORTS = ["high"] as const;
@@ -57,6 +57,29 @@ export function isOpenAIGpt56Model(model: OpenAIReasoningModel): boolean {
   const id = normalizeModelId(typeof model.id === "string" ? model.id : undefined);
   const name = normalizeModelId(typeof model.name === "string" ? model.name : undefined);
   return /^gpt-5\.6(?:-|$)/u.test(id) || /^gpt-5\.6(?:\s|\(|-|$)/u.test(name);
+}
+
+/** Apply the native Chat Completions tool contract after callers qualify the endpoint and model ID. */
+export function applyOpenAICompletionsToolReasoning(
+  payload: Record<string, unknown>,
+  model: { id: string; name?: string },
+): void {
+  if (!Array.isArray(payload.tools) || payload.tools.length === 0) {
+    return;
+  }
+  // Native Chat Completions rejects tools with enabled GPT-5.6 reasoning,
+  // and rejects the effort field entirely for GPT-5.4 Mini and GPT-5.5 tools.
+  if (isOpenAIGpt56Model(model)) {
+    payload.reasoning_effort = "none";
+  } else if (isOpenAIGpt54MiniModel(model) || isOpenAIGpt55Model(model)) {
+    delete payload.reasoning_effort;
+  }
+}
+
+/** Return whether a model has a known GPT-6 reasoning and sampling contract. */
+export function isOpenAIGpt6Model(model: OpenAIReasoningModel): boolean {
+  const id = normalizeModelId(typeof model.id === "string" ? model.id : undefined);
+  return id === "gpt-6-astra" || id === "gpt-6-sol" || id === "gpt-6-luna" || id === "gpt-6.1-sol";
 }
 
 /** Normalize user-facing reasoning effort names to API effort names. */
@@ -104,9 +127,12 @@ export function resolveOpenAIModelReasoningEfforts(
   const id = normalizeModelId(typeof model.id === "string" ? model.id : undefined);
   const api = resolveOpenAIThinkingApi(model.api);
   const supportsMax = api !== "openai-completions";
-  // Azure deployment capabilities must be declared until its Astra contract is verified.
-  if (id === "gpt-6-astra" && api !== "azure-openai-responses") {
-    return supportsMax ? GPT_6_ASTRA_REASONING_EFFORTS : GPT_CODEX_REASONING_EFFORTS;
+  // Azure deployment capabilities remain explicit until its GPT-6 contracts are verified.
+  if (isOpenAIGpt6Model(model) && api !== "azure-openai-responses") {
+    if (id === "gpt-6-astra" || id === "gpt-6.1-sol") {
+      return supportsMax ? GPT_6_MANDATORY_REASONING_EFFORTS : GPT_CODEX_REASONING_EFFORTS;
+    }
+    return supportsMax ? GPT_56_REASONING_EFFORTS : GPT_52_REASONING_EFFORTS;
   }
   if (/^gpt-5\.6(?:-|$)/u.test(id)) {
     return supportsMax ? GPT_56_REASONING_EFFORTS : GPT_52_REASONING_EFFORTS;
@@ -139,7 +165,7 @@ export function resolveOpenAIModelReasoningEfforts(
 }
 
 /**
- * Return whether a model accepts temperature. GPT-5.6 and GPT-6 Astra
+ * Return whether a model accepts temperature. GPT-5.6 and known GPT-6 models
  * reject it with a 400; catalog compat can override per model.
  */
 export function supportsOpenAITemperature(model: OpenAIReasoningModel): boolean {
@@ -152,7 +178,8 @@ export function supportsOpenAITemperature(model: OpenAIReasoningModel): boolean 
   }
   const id = normalizeModelId(typeof model.id === "string" ? model.id : undefined);
   return (
-    (id !== "gpt-6-astra" || resolveOpenAIThinkingApi(model.api) === "azure-openai-responses") &&
+    (!isOpenAIGpt6Model(model) ||
+      resolveOpenAIThinkingApi(model.api) === "azure-openai-responses") &&
     !/^gpt-5\.6(?:-|$)/u.test(id)
   );
 }

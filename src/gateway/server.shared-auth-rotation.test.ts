@@ -69,8 +69,7 @@ describe("gateway shared auth rotation", () => {
         await server?.close();
         server = undefined;
       },
-      // The injected emitter does not start a successor process. Retire its
-      // process-wide restart fence after server shutdown before the next fixture.
+      // The fixture observes emission without starting a successor process.
       () => resetGatewayRestartStateForInProcessRestart(),
       () => resetGatewayWorkAdmission(),
       () => state.cleanup(),
@@ -143,7 +142,9 @@ describe("gateway shared auth rotation", () => {
   async function openDeviceTokenClient(
     params: { issuerGeneration?: string; browserClient?: boolean } = {},
   ) {
-    const identity = loadOrCreateDeviceIdentity({ path: state.path("device-identity.sqlite") });
+    const identity = loadOrCreateDeviceIdentity({
+      path: state.path("device-identity", "client", "credentials.sqlite"),
+    });
     const clientName = params.browserClient ? "openclaw-control-ui" : "test";
     const mode = params.browserClient ? "webchat" : "test";
     const pending = await requestDevicePairing({
@@ -227,17 +228,18 @@ describe("gateway shared auth rotation", () => {
     await expectAuthChangedClose(connection);
   });
 
-  it.each(["config.patch", "config.apply"])(
-    "acknowledges restart admission before auth close for %s",
+  it.each(["config.patch", "config.apply"] as const)(
+    "acknowledges restart admission before auth close and emission for %s",
     async (method) => {
+      const events: string[] = [];
       const emitted = createDeferredCore();
       await startGateway(OLD_TOKEN, () => {
+        events.push("restart-emission");
         emitted.resolve();
         return { status: "emitted" };
       });
       const connection = await connect({ token: OLD_TOKEN });
       const before = await connection.client.request<ConfigSnapshot>("config.get");
-      const events: string[] = [];
       void connection.closed.then(() => events.push("auth-close"));
       const gateway = {
         ...before.config.gateway,
@@ -256,10 +258,8 @@ describe("gateway shared auth rotation", () => {
         sentinel: { payload: { stats: { requiresRestart: true } } },
       });
       await expectAuthChangedClose(connection);
-      expect(events).toEqual(["success-response", "auth-close"]);
-      // Use the real RPC, config watcher, and socket; observe the production
-      // emission callback without restarting the test runner process.
       await withTestTimeout(emitted.promise, 10_000, "gateway restart was not emitted");
+      expect(events).toEqual(["success-response", "auth-close", "restart-emission"]);
     },
   );
 
@@ -273,44 +273,41 @@ describe("gateway shared auth rotation", () => {
     expect(connection.hellos()).toBe(1);
   });
 
-  it("disconnects issuer-tagged device-token websocket sessions after shared token rotation", async () => {
-    await startGateway();
-    const connection = await openDeviceTokenClient({
-      issuerGeneration: requiredSharedGeneration(),
-    });
-    await rotateSharedToken(connection.client);
-    await expectAuthChangedClose(connection);
-  });
-
   it.each([
     { label: "browser", browserClient: true },
     { label: "non-browser", browserClient: false },
-  ])("preserves issuer-tagged $label device tokens on reconnect", async ({ browserClient }) => {
-    await startGateway();
-    const issuerGeneration = requiredSharedGeneration();
-    const { deviceId, hello } = await openDeviceTokenClient({ issuerGeneration, browserClient });
-    const token = hello.auth?.deviceToken;
-    expect(token).toBeTypeOf("string");
-    if (typeof token !== "string") {
-      throw new Error("expected hello device token");
-    }
-    expect((await getPairedDevice(deviceId))?.tokens?.operator?.issuer).toEqual({
-      kind: "shared-gateway-auth",
-      generation: issuerGeneration,
-    });
-    await expect(
-      verifyDeviceToken({
-        deviceId,
-        token,
-        role: "operator",
-        scopes: ["operator.admin"],
-        requiredSharedGatewaySessionGeneration: issuerGeneration,
-      }),
-    ).resolves.toEqual({
-      ok: true,
-      issuer: { kind: "shared-gateway-auth", generation: issuerGeneration },
-    });
-  });
+  ])(
+    "preserves $label token issuers on reconnect and revokes sessions on rotation",
+    async ({ browserClient }) => {
+      await startGateway();
+      const issuerGeneration = requiredSharedGeneration();
+      const connection = await openDeviceTokenClient({ issuerGeneration, browserClient });
+      const { deviceId, hello } = connection;
+      const token = hello.auth?.deviceToken;
+      expect(token).toBeTypeOf("string");
+      if (typeof token !== "string") {
+        throw new Error("expected hello device token");
+      }
+      expect((await getPairedDevice(deviceId))?.tokens?.operator?.issuer).toEqual({
+        kind: "shared-gateway-auth",
+        generation: issuerGeneration,
+      });
+      await expect(
+        verifyDeviceToken({
+          deviceId,
+          token,
+          role: "operator",
+          scopes: ["operator.admin"],
+          requiredSharedGatewaySessionGeneration: issuerGeneration,
+        }),
+      ).resolves.toEqual({
+        ok: true,
+        issuer: { kind: "shared-gateway-auth", generation: issuerGeneration },
+      });
+      await rotateSharedToken(connection.client);
+      await expectAuthChangedClose(connection);
+    },
+  );
 
   it("disconnects shared-auth websocket sessions when config.apply rewrites a SecretRef token", async () => {
     setTestEnvValue(SECRET_REF_TOKEN_ID, OLD_TOKEN);

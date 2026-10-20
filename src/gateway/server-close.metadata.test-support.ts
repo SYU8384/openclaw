@@ -1,4 +1,4 @@
-// Shared real Gateway metadata/cache fixture; spies live only during acquisition.
+// Shared real Gateway metadata/cache fixture; startup joins owned audit maintenance.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -18,58 +18,43 @@ import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { createGatewayKernel } from "./server-kernel.js";
 import type { GatewayServer, GatewayServerOptions } from "./server-public.js";
 import { startGatewayServerCore } from "./server-start.js";
+import { KERNEL_TEST_ENV } from "./test-helpers.env.js";
 import { reserveGatewayTestListener } from "./test-helpers.listener.js";
+// Keep cold source transformation of mandatory startup code outside behavior-test deadlines.
+import "./server-reload-managed.js";
 
 export async function createGatewayMetadataCloseFixture(label: string) {
   const original = captureActivePluginRegistrySnapshot();
   const state = await createOpenClawTestState({
     label,
     layout: "home",
-    env: {
-      OPENCLAW_GATEWAY_PASSWORD: undefined,
-      OPENCLAW_GATEWAY_TOKEN: undefined,
-      OPENCLAW_SKIP_BROWSER_CONTROL_SERVER: "1",
-      OPENCLAW_SKIP_CANVAS_HOST: "1",
-      OPENCLAW_SKIP_CHANNELS: "1",
-      OPENCLAW_SKIP_CRON: "1",
-      OPENCLAW_SKIP_GMAIL_WATCHER: "1",
-      OPENCLAW_SKIP_PROVIDERS: "1",
-      OPENCLAW_TEST_MINIMAL_GATEWAY: "1",
-      VITEST: "1",
-    },
+    env: KERNEL_TEST_ENV,
   });
   const pluginId = "metadata-fixture";
   const rootDir = state.path(pluginId);
   await fs.mkdir(rootDir);
-  await fs.writeFile(
-    path.join(rootDir, "package.json"),
-    JSON.stringify({
-      name: pluginId,
-      version: "1.0.0",
-      type: "commonjs",
-      openclaw: { extensions: ["./index.cjs"] },
-    }),
-  );
-  await fs.writeFile(
-    path.join(rootDir, "openclaw.plugin.json"),
-    JSON.stringify({
-      id: pluginId,
-      activation: { onStartup: true },
-      configSchema: { type: "object", properties: {} },
-    }),
-  );
-  await fs.writeFile(
-    path.join(rootDir, "index.cjs"),
-    `module.exports = { id: ${JSON.stringify(pluginId)}, register() {} };`,
-  );
+  const write = (name: string, source: string) => fs.writeFile(path.join(rootDir, name), source);
+  const writeJson = (name: string, value: unknown) => write(name, JSON.stringify(value));
+  await writeJson("package.json", {
+    name: pluginId,
+    version: "1.0.0",
+    type: "commonjs",
+    openclaw: { extensions: ["./index.cjs"] },
+  });
+  await writeJson("openclaw.plugin.json", {
+    id: pluginId,
+    activation: { onStartup: true },
+    configSchema: { type: "object", properties: {} },
+  });
+  await write("index.cjs", `module.exports = { id: ${JSON.stringify(pluginId)}, register() {} };`);
   const source = path.join(rootDir, "callback.cjs");
   const dependency = path.join(rootDir, "lazy.mjs");
   const event = `${label}-setup`;
   const listeners = process.listenerCount(event);
   const writeCallback = async (value: string) => {
-    await fs.writeFile(dependency, `export const value = ${JSON.stringify(value)};`);
-    await fs.writeFile(
-      source,
+    await write("lazy.mjs", `export const value = ${JSON.stringify(value)};`);
+    await write(
+      "callback.cjs",
       `module.exports = (lifecycle) => {
         const listener = () => {};
         process.on(${JSON.stringify(event)}, listener);
@@ -100,6 +85,24 @@ export async function createGatewayMetadataCloseFixture(label: string) {
     return reservation.port;
   };
   const create = createGatewayKernel;
+  const audit = await import("../audit/audit-event-writer.js");
+  const createAuditWriter = audit.createAuditEventWriter;
+  const auditReadiness = new Set<Promise<void>>();
+  const auditFactory = vi.spyOn(audit, "createAuditEventWriter").mockImplementation((options) => {
+    const writer = createAuditWriter(options);
+    auditReadiness.add(writer.ready);
+    return writer;
+  });
+  const health = await import("./server/event-loop-health.js");
+  const createHealthMonitor = health.createGatewayEventLoopHealthMonitor;
+  const healthFactory = vi
+    .spyOn(health, "createGatewayEventLoopHealthMonitor")
+    .mockImplementation((...args) => {
+      const monitor = createHealthMonitor(...args);
+      // Real CPU sampling can arm timeouts after callers install a controlled clock.
+      monitor.stop();
+      return monitor;
+    });
   setActivePluginRegistry(createEmptyPluginRegistry());
   return {
     state,
@@ -141,7 +144,7 @@ export async function createGatewayMetadataCloseFixture(label: string) {
           port,
           auth: { mode: "token", token },
           controlUi: { enabled: false },
-          reload: { mode: "off" },
+          reload: config.gateway?.reload ?? { mode: "off" },
         },
       });
       const factory = vi
@@ -170,17 +173,25 @@ export async function createGatewayMetadataCloseFixture(label: string) {
         factory.mockRestore();
       }
       await server.startupSettled;
+      // Initial audit pruning admits a worker and arms its idle timer. Finish
+      // that real-clock setup before callers install a controlled test clock.
+      await Promise.all(auditReadiness);
       return server;
     },
     async cleanup() {
-      for (const server of servers.toReversed()) {
-        await server.close().catch(() => {});
+      try {
+        for (const server of servers.toReversed()) {
+          await server.close().catch(() => {});
+        }
+        for (const listener of reservedListeners.values()) {
+          await listener.closeUnadopted();
+        }
+        restoreActivePluginRegistrySnapshot(original);
+        await state.cleanup();
+      } finally {
+        healthFactory.mockRestore();
+        auditFactory.mockRestore();
       }
-      for (const listener of reservedListeners.values()) {
-        await listener.closeUnadopted();
-      }
-      restoreActivePluginRegistrySnapshot(original);
-      await state.cleanup();
     },
   };
 }

@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { claimAgentRunContext, releaseAgentRunContext } from "../../../infra/agent-run-registry.js";
-import { getSubagentExecutionObservation } from "./subagent-execution-observation.js";
+import { registerAgentRunCapacityWait } from "../../../infra/agent-run-capacity-wait.js";
+import {
+  claimAgentRunContext,
+  getAgentRunLifecycleGeneration,
+  releaseAgentRunContext,
+} from "../../../infra/agent-run-registry.js";
+import {
+  observeSubagentExecution,
+  resolveYieldedLeafPausedForMs,
+} from "./subagent-execution-observation.js";
 import { subagentRuns } from "./subagent-registry-memory.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
@@ -22,68 +30,37 @@ function run(runId: string, overrides: Partial<SubagentRunRecord> = {}): Subagen
 afterEach(() => subagentRuns.clear());
 
 describe("subagent execution observation", () => {
-  it("follows the task across successor runs without borrowing another task or generation", () => {
-    const original = run("original");
-    subagentRuns.set(original.runId, original);
-    const target = { taskRunId: original.runId, childSessionKey: original.childSessionKey };
-    const claim = claimAgentRunContext(
-      original.runId,
-      { sessionKey: original.childSessionKey },
-      { trackOwner: true, ownsContext: true },
-    );
-    try {
-      expect(getSubagentExecutionObservation(target)).toEqual({
-        state: "running",
-        executionRunId: original.runId,
+  it.each([false, true])(
+    "reports capacity-waiting subagents as queued (collector=%s)",
+    (collect) => {
+      const entry = run("capacity-waiting-child", { collect });
+      subagentRuns.set(entry.runId, entry);
+      const claim = claimAgentRunContext(
+        entry.runId,
+        { sessionKey: entry.childSessionKey },
+        { trackOwner: true, ownsContext: true },
+      );
+      const releaseWait = registerAgentRunCapacityWait(
+        entry.runId,
+        getAgentRunLifecycleGeneration(),
+      );
+      try {
+        expect(observeSubagentExecution(entry, [])).toEqual({
+          state: "queued",
+        });
+        releaseWait?.();
+        expect(observeSubagentExecution(entry, [])).toEqual({
+          state: "running",
+        });
+      } finally {
+        releaseWait?.();
+        releaseAgentRunContext(entry.runId, claim);
+      }
+      expect(observeSubagentExecution(entry, [])).toEqual({
+        state: "unknown",
       });
-    } finally {
-      releaseAgentRunContext(original.runId, claim);
-    }
-    original.execution = { status: "queued" };
-    expect(getSubagentExecutionObservation(target)).toEqual({
-      state: "unknown",
-      executionRunId: original.runId,
-    });
-
-    const successor = run("successor", {
-      taskRunId: original.runId,
-      childSessionKey: original.childSessionKey,
-      generation: 2,
-      pauseReason: "sessions_yield",
-      execution: { status: "terminal", endedAt: Date.now() },
-    });
-    subagentRuns.delete(original.runId);
-    subagentRuns.set(successor.runId, successor);
-    expect(getSubagentExecutionObservation(target)).toEqual({
-      state: "waiting",
-      wait: { kind: "external" },
-      executionRunId: successor.runId,
-    });
-    expect(getSubagentExecutionObservation({ ...target, generation: 1 })).toBeUndefined();
-    expect(getSubagentExecutionObservation({ ...target, taskRunId: "other-task" })).toBeUndefined();
-    const otherTask = run("other-task", {
-      childSessionKey: original.childSessionKey,
-      generation: 3,
-      pauseReason: "sessions_yield",
-      execution: { status: "terminal", endedAt: Date.now() },
-    });
-    subagentRuns.set(otherTask.runId, otherTask);
-    const privateChild = run("replacement-private-child", {
-      requesterSessionKey: otherTask.childSessionKey,
-      expectsCompletionMessage: true,
-    });
-    subagentRuns.set(privateChild.runId, privateChild);
-    expect(getSubagentExecutionObservation(target)).toBeUndefined();
-    expect(getSubagentExecutionObservation({ ...target, generation: 2 })).toBeUndefined();
-    expect(
-      getSubagentExecutionObservation({ ...target, taskRunId: otherTask.runId }),
-    ).toMatchObject({
-      executionRunId: otherTask.runId,
-      wait: { kind: "children", pendingCount: 1 },
-    });
-    subagentRuns.clear();
-    expect(getSubagentExecutionObservation(target)).toBeUndefined();
-  });
+    },
+  );
 
   it("observes only latest announced children and clears dependencies after settlement or deletion", () => {
     const parent = run("parent", {
@@ -101,8 +78,7 @@ describe("subagent execution observation", () => {
     });
     subagentRuns.set(child.runId, child);
     subagentRuns.set(collector.runId, collector);
-    const target = { taskRunId: parent.runId, childSessionKey: parent.childSessionKey };
-    expect(getSubagentExecutionObservation(target)?.wait).toEqual({
+    expect(observeSubagentExecution(parent, subagentRuns.values()).wait).toEqual({
       kind: "children",
       pendingCount: 1,
       dependencies: [{ runId: child.runId, sessionKey: child.childSessionKey }],
@@ -116,18 +92,59 @@ describe("subagent execution observation", () => {
       cleanupCompletedAt: Date.now(),
     });
     subagentRuns.set(replacement.runId, replacement);
-    expect(getSubagentExecutionObservation(target)?.wait).toEqual({ kind: "external" });
+    expect(observeSubagentExecution(parent, subagentRuns.values()).wait).toEqual({
+      kind: "external",
+    });
     replacement.pauseReason = "sessions_yield";
     replacement.endedReason = "subagent-killed";
     replacement.execution.outcome = { status: "error", error: "killed" };
-    expect(getSubagentExecutionObservation(target)?.wait).toEqual({ kind: "external" });
+    expect(observeSubagentExecution(parent, subagentRuns.values()).wait).toEqual({
+      kind: "external",
+    });
     replacement.cleanupCompletedAt = undefined;
-    expect(getSubagentExecutionObservation(target)?.wait).toMatchObject({
+    expect(observeSubagentExecution(parent, subagentRuns.values()).wait).toMatchObject({
       kind: "children",
       pendingCount: 1,
     });
     subagentRuns.delete(child.runId);
     subagentRuns.delete(replacement.runId);
-    expect(getSubagentExecutionObservation(target)?.wait).toEqual({ kind: "external" });
+    expect(observeSubagentExecution(parent, subagentRuns.values()).wait).toEqual({
+      kind: "external",
+    });
+  });
+
+  it("reports pause age only for a continuable yielded leaf", () => {
+    const now = 2_000_000_000_000;
+    const pausedAt = now - 90_000_000;
+    const paused = (id: string, overrides: Partial<SubagentRunRecord> = {}) =>
+      run(id, {
+        pauseReason: "sessions_yield",
+        execution: { status: "terminal", endedAt: pausedAt },
+        ...overrides,
+      });
+    const age = (entry: SubagentRunRecord, children: SubagentRunRecord[] = []) =>
+      resolveYieldedLeafPausedForMs(entry, observeSubagentExecution(entry, children), now);
+
+    expect(age(paused("leaf"))).toBe(90_000_000);
+    expect(age(paused("future", { execution: { status: "terminal", endedAt: now + 5 } }))).toBe(0);
+
+    const parent = paused("parent");
+    const child = run("child", {
+      requesterSessionKey: parent.childSessionKey,
+      expectsCompletionMessage: true,
+    });
+    expect(age(parent, [child])).toBeUndefined();
+    expect(age(paused("collector", { collect: true }))).toBeUndefined();
+    expect(
+      age(
+        paused("resumed", {
+          execution: { status: "running", startedAt: pausedAt, endedAt: pausedAt },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      age(run("finished", { execution: { status: "terminal", endedAt: pausedAt } })),
+    ).toBeUndefined();
+    expect(age(paused("no-timestamp", { execution: { status: "terminal" } }))).toBeUndefined();
   });
 });

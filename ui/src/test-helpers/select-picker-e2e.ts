@@ -1,8 +1,18 @@
 import type { Locator, Page } from "playwright";
 import { expect } from "vitest";
 
-export function pickerValue(picker: Locator) {
-  return picker.locator('[role="option"][aria-selected="true"]').getAttribute("data-value");
+export async function pickerValue(picker: Locator) {
+  const trigger = picker.locator(".picker-select__trigger");
+  const wasClosed = (await trigger.getAttribute("aria-expanded")) === "false";
+  await openPicker(picker);
+  try {
+    return await picker.locator('[role="option"][aria-selected="true"]').getAttribute("data-value");
+  } finally {
+    if (wasClosed) {
+      await trigger.click();
+      await picker.locator(".picker-select__menu").waitFor({ state: "hidden" });
+    }
+  }
 }
 
 export async function openPicker(picker: Locator) {
@@ -10,7 +20,7 @@ export async function openPicker(picker: Locator) {
   if ((await trigger.getAttribute("aria-expanded")) === "false") {
     await trigger.click();
   }
-  await picker.getByRole("listbox").waitFor({ state: "visible" });
+  await picker.locator(".picker-select__menu").waitFor({ state: "visible" });
 }
 
 export async function selectPickerValue(picker: Locator, value: string) {

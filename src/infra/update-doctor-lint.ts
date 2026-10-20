@@ -7,7 +7,9 @@ import {
   type UpdateDoctorLintFinding,
 } from "./update-doctor-lint-schema.js";
 import { normalizeUpdateFailureFacts } from "./update-failure-facts.js";
-import type { UpdateStepResult } from "./update-runner-types.js";
+import type { UpdateStepResult } from "./update-step-result.js";
+
+export const UPDATE_DOCTOR_DISPOSAL_WARNING_PREFIX = "[warning] Doctor disposal";
 
 const UpdateDoctorLintReportSchema = z.object({
   ok: z.boolean(),
@@ -70,6 +72,9 @@ export function parseUpdateDoctorLintReport(stdout: string, env: NodeJS.ProcessE
     throw new Error("Updated Doctor returned an invalid readiness result.");
   }
   const result = validated.data;
+  if (result.ok && result.findings.length) {
+    throw new Error("Updated Doctor returned findings with a successful readiness result.");
+  }
   // Published 2026.9.5 candidates predate update-specific policy classification.
   const policy = result.findings.filter(
     (finding) => finding.checkId === "core/doctor/security" && finding.severity === "error",
@@ -133,6 +138,17 @@ export function applyUpdateDoctorLintReport(
     step.advisory = {
       kind: "recoverable-maintenance",
       message: "Doctor security policy findings are advisory during updates.",
+    };
+  }
+  const deferred = report?.warnings.filter(
+    (warning) => warning.errorCode === "update-inspection-deferred",
+  ).length;
+  // A passing report with budget-deferred inspections is incomplete, not a
+  // clean pass. Failed exits keep their failure; advisory would mask them.
+  if (code === 0 && report?.ok && deferred) {
+    step.advisory = {
+      kind: "recoverable-maintenance",
+      message: `Doctor deferred ${deferred} inspection${deferred === 1 ? "" : "s"} until after activation (${report.checksRun} ran). Run \`openclaw doctor --fix\` after the update.`,
     };
   }
   step.doctorLintFindings = report?.doctorLintFindings ?? [];

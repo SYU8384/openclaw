@@ -1,5 +1,8 @@
 import { withTrustedEnvProxyGuardedFetchMode } from "openclaw/plugin-sdk/fetch-runtime";
-import type { ProviderUsageSnapshot } from "openclaw/plugin-sdk/provider-usage";
+import {
+  buildUsageErrorSnapshot,
+  type ProviderUsageSnapshot,
+} from "openclaw/plugin-sdk/provider-usage";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
 import {
   fetchWithSsrFGuard,
@@ -71,13 +74,9 @@ function buildSummary(payload: ClawRouterUsagePayload): string | undefined {
 
 async function readClawRouterUsagePayload(
   response: Response,
-  timeoutMs: number,
 ): Promise<ClawRouterUsagePayload | undefined> {
   const buffer = await readResponseWithLimit(response, CLAWROUTER_USAGE_RESPONSE_MAX_BYTES, {
-    chunkTimeoutMs: timeoutMs,
     onOverflow: ({ maxBytes }) => new Error(`ClawRouter usage response exceeds ${maxBytes} bytes`),
-    onIdleTimeout: ({ chunkTimeoutMs }) =>
-      new Error(`ClawRouter usage response stalled: no data received for ${chunkTimeoutMs}ms`),
   });
   try {
     const payload: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer));
@@ -122,14 +121,9 @@ export async function fetchClawRouterUsage(params: {
       void response.body?.cancel().catch(() => undefined);
       throw new Error(`ClawRouter usage request failed (HTTP ${response.status})`);
     }
-    const payload = await readClawRouterUsagePayload(response, params.timeoutMs);
+    const payload = await readClawRouterUsagePayload(response);
     if (!payload) {
-      return {
-        provider: "clawrouter",
-        displayName: "ClawRouter",
-        windows: [],
-        error: "Malformed usage response",
-      };
+      return buildUsageErrorSnapshot("clawrouter", "Malformed usage response");
     }
     const budget = payload.budget;
     const limitMicros = asFiniteNumberInRange(budget?.limitMicros, { min: 0 });
