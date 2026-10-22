@@ -1,4 +1,3 @@
-import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { onSettled } from "solid-js";
 import { createDeferredCore } from "../../../../src/shared/deferred.js";
@@ -12,7 +11,6 @@ import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { createSessionDetails } from "../../components/session-details.ts";
 import { hasSessionArchiveDescendants } from "../../components/session-menu-descendants.ts";
 import { fetchSessionMenuWork } from "../../components/session-menu-work.ts";
-import "../../components/session-menu-solid.tsx";
 import { moveSessionFromMenu } from "../../components/session-placement-action.ts";
 import {
   formatBatchSessionRemovalError,
@@ -21,7 +19,6 @@ import {
 import { t } from "../../i18n/index.ts";
 import { registerSessionOrganizationEnglish } from "../../i18n/locales/en-session-organization.ts";
 import { watchAgentScope } from "../../lib/agents/index.ts";
-import { formatUiError } from "../../lib/format-error.ts";
 import { canCallGatewayMethod } from "../../lib/gateway-methods.ts";
 import { GatewayPageBinding } from "../../lib/gateway-page-binding.ts";
 import { observeState } from "../../lib/reactive/observe-state.ts";
@@ -48,24 +45,21 @@ import {
   sessionNavigationTarget,
 } from "../../lib/sessions/route-navigation.ts";
 import {
-  isPinnableUiSessionRow,
-  isSubagentSessionKey,
   resolveUiConfiguredMainKey,
   resolveUiSessionRowAgentId,
   scopedSessionArtifactKey,
 } from "../../lib/sessions/session-key.ts";
 import { requestSessionInvolvement } from "../../lib/sessions/session-requests.ts";
-import { searchVisibleSessionTranscripts } from "../../lib/sessions/transcript-search.ts";
 import { formatPreservedWorktreesNotice } from "../../lib/sessions/worktree-preservation.ts";
 import { runControlUiPluginAction } from "../../plugins/control-ui-actions.ts";
 import {
-  ensureSessionAgentIdentities,
   sessionAgentId,
+  sessionAgentIds,
   sessionAgentIdentityById,
   sessionPathAgentId,
 } from "./agent-scope.ts";
 import { createSessionsArchive } from "./archive-actions.ts";
-import { rememberSessionCustomGroup, sessionCategoryNames } from "./custom-groups.ts";
+import { createSessionGroups } from "./custom-groups.ts";
 import { resolveSessionDeleteOutcome } from "./delete-outcome.ts";
 import { buildSessionsListQuery } from "./list-query.ts";
 import {
@@ -89,6 +83,7 @@ import {
 } from "./session-menu.tsx";
 import type { SessionsAdvancedFiltersProps } from "./sessions-filters.tsx";
 import type { SessionsPageListBinding, SessionsPageState } from "./sessions-page-state.types.ts";
+import { createTranscriptSearch } from "./transcript-search.ts";
 
 registerSessionOrganizationEnglish();
 
@@ -140,6 +135,12 @@ export function createSessionsPage(
   });
   const state = observation.state;
   const publish = observation.invalidate;
+  const transcriptSearch = createTranscriptSearch({
+    state,
+    captureScope: captureRequestScope,
+    isCurrent: isRequestScopeCurrent,
+    listOptions: (scope) => sessionListOptions(scope.context, ""),
+  });
   // Route deep-link target (?session=...); unlike expandedSessionKey it also
   // narrows sessionListOptions so the linked session is guaranteed to load.
   let deepLinkSessionKey: string | null = null;
@@ -183,7 +184,7 @@ export function createSessionsPage(
   const observeAgentScope = watchAgentScope(() => {
     // Keep same-connection list serialization.
     retirePageOperations();
-    resetTranscriptSearchState(state.transcriptSearchQuery);
+    transcriptSearch.reset();
     if (!deepLinkSessionKey) {
       state.page = 0;
       state.selectedSessions = new Map();
@@ -216,36 +217,6 @@ export function createSessionsPage(
     },
   );
 
-  let transcriptSearchAbort: AbortController | undefined;
-  async function searchTranscripts(query: string) {
-    transcriptSearchAbort?.abort();
-    const lifetime = new AbortController();
-    transcriptSearchAbort = lifetime;
-    const scope = captureRequestScope();
-    if (!scope) {
-      state.transcriptSearch = null;
-      return;
-    }
-    const isCurrent = () => !lifetime.signal.aborted && isRequestScopeCurrent(scope);
-    const result = searchVisibleSessionTranscripts({
-      client: scope.client,
-      query,
-      listOptions: sessionListOptions(scope.context, ""),
-      isCurrent,
-    }).then(
-      (searchResult) => (isCurrent() ? searchResult : null),
-      (error: unknown) => {
-        if (isCurrent()) {
-          throw error;
-        }
-        return null;
-      },
-    );
-    state.transcriptSearch = result;
-    // Rendering owns errors; command callers still await the admitted request.
-    await result.catch(() => undefined);
-  }
-
   function synchronize() {
     bindSessionList();
     details.synchronize();
@@ -267,7 +238,7 @@ export function createSessionsPage(
     clearSearchTimer();
     listRequest = undefined;
     rosterReadiness.retire();
-    resetTranscriptSearchState(state.transcriptSearchQuery);
+    transcriptSearch.reset();
     state.loading = false;
     state.refreshing = false;
   }
@@ -277,7 +248,7 @@ export function createSessionsPage(
     state.error = null;
     state.loading = false;
     state.refreshing = false;
-    resetTranscriptSearchState("");
+    transcriptSearch.reset("");
     state.selectedSessions = new Map();
     state.expandedSessionKey = null;
     deepLinkSessionKey = null;
@@ -294,6 +265,20 @@ export function createSessionsPage(
     refresh: refreshSessionList,
     agentId: sessionAgentId,
     patch: patchSession,
+  });
+
+  const groups = createSessionGroups({
+    state,
+    customGroups: () => application.sessions.state.groups ?? [],
+    captureScope: captureRequestScope,
+    isCurrent: isRequestScopeCurrent,
+    accessError: (scope) =>
+      mutationAccessError(scope, {
+        method: "sessions.groups.put",
+        requiredScope: "operator.write",
+      }),
+    patch: patchSession,
+    dialog: inputDialog,
   });
 
   function captureRequestScope(): SessionsPageRequestScope | null {
@@ -394,17 +379,12 @@ export function createSessionsPage(
   }
 
   function sessionListOptions(context: ApplicationContext, search = state.searchQuery) {
-    return buildSessionsListQuery(context, {
-      activeMinutes: parseStrictPositiveInteger(state.activeMinutes),
-      // The Limit box is an explicit page size, so an unparseable entry falls
-      // back to the page default rather than to the shared roster page size.
-      limit: parseStrictPositiveInteger(state.limit) ?? SESSIONS_PAGE_DEFAULT_LIMIT,
-      includeGlobal: state.includeGlobal,
-      includeUnknown: state.includeUnknown,
-      statusFilter: state.statusFilter,
+    return buildSessionsListQuery(
+      context.agentSelection.state.scopeId,
+      state,
       deepLinkSessionKey,
       search,
-    });
+    );
   }
 
   function bindSessionList(refreshMissing = true): SessionsPageListBinding | undefined {
@@ -424,7 +404,7 @@ export function createSessionsPage(
       unsubscribeList?.();
       unsubscribeList = undefined;
       if (current?.sessions !== sessions || current.transcriptKey !== transcriptKey) {
-        resetTranscriptSearchState(state.transcriptSearchQuery);
+        transcriptSearch.reset();
       }
       // Retired rows cannot be selected under replacement text, even during debounce.
       state.result = null;
@@ -468,7 +448,7 @@ export function createSessionsPage(
     if (result !== appliedListResult) {
       appliedListResult = result;
       state.result = filterSessionRows(result, { archivedFilter: state.statusFilter });
-      ensureSessionAgentIdentities(application.agentIdentity, state.result);
+      void application.agentIdentity.ensure(sessionAgentIds(state.result));
     }
     if (!snapshot.loading && !snapshot.error && state.result && state.selectedSessions.size > 0) {
       state.selectedSessions = reconcileSelectedSessions(
@@ -535,35 +515,6 @@ export function createSessionsPage(
   function clearSearchTimer() {
     clearTimeout(searchTimer);
     searchTimer = undefined;
-  }
-
-  function resetTranscriptSearchState(query: string) {
-    state.transcriptSearchQuery = query;
-    transcriptSearchAbort?.abort();
-    state.transcriptSearch = null;
-  }
-
-  function updateTranscriptSearchQuery(query: string) {
-    if (query === state.transcriptSearchQuery) {
-      return;
-    }
-    // Editing invalidates the visible results and the in-flight query so a
-    // late response cannot appear under different search text.
-    resetTranscriptSearchState(query);
-  }
-
-  async function runTranscriptSearch() {
-    const query = state.transcriptSearchQuery.trim();
-    if (!query) {
-      resetTranscriptSearchState("");
-      return;
-    }
-    const scope = captureRequestScope();
-    if (!scope) {
-      return;
-    }
-    state.transcriptSearchQuery = query;
-    await searchTranscripts(query);
   }
 
   function updateFilters(next: Parameters<SessionsAdvancedFiltersProps["onFiltersChange"]>[0]) {
@@ -821,124 +772,6 @@ export function createSessionsPage(
     });
   }
 
-  function knownCategories(): string[] {
-    return sessionCategoryNames(state.result, application.sessions.state.groups ?? []);
-  }
-
-  async function rememberCustomGroup(
-    name: string,
-    scope: SessionsPageRequestScope | null = captureRequestScope(),
-  ): Promise<SessionsPageMutationResult> {
-    if (!scope) {
-      return "stale";
-    }
-    const accessError = mutationAccessError(scope, {
-      method: "sessions.groups.put",
-      requiredScope: "operator.write",
-    });
-    if (accessError) {
-      return { status: "failed", error: accessError };
-    }
-    state.error = null;
-    return rememberSessionCustomGroup({
-      name,
-      knownCategories: knownCategories(),
-      sessions: scope.sessions,
-      isCurrent: () => isRequestScopeCurrent(scope),
-      onError: (message) => {
-        state.error = message;
-      },
-    });
-  }
-
-  async function assignCategory(key: string, category: string | null) {
-    // Only patch keys that exist in the current result; sessions.patch would
-    // otherwise create a store entry for arbitrary dropped text.
-    const session = state.result?.sessions.find((row) => row.key === key);
-    if (!session) {
-      return undefined;
-    }
-    // Dropping a row onto its own section is a no-op; skip the patch round-trip.
-    const current = session.category?.trim() || null;
-    const promote = !isSubagentSessionKey(session.key) && !isPinnableUiSessionRow(session);
-    if (current === category && !promote) {
-      return undefined;
-    }
-    const scope = captureRequestScope();
-    if (!scope) {
-      return undefined;
-    }
-    if (category) {
-      const remembered = await rememberCustomGroup(category, scope);
-      if (remembered !== "completed") {
-        return remembered;
-      }
-    }
-    return patchSession(
-      key,
-      { category, ...(promote ? { sidebarRoot: true } : {}) },
-      scope,
-      session.sessionId,
-    );
-  }
-
-  async function requestNewCategory(sessionKey?: string) {
-    // Capture before loading the dialog: its key may belong to a replacement
-    // by the time the operator submits or the catalog write completes.
-    const session = state.result?.sessions.find((row) => row.key === sessionKey);
-    if (sessionKey && !session?.sessionId) {
-      state.error = t("common.refresh");
-      return;
-    }
-    await inputDialog.open(() => ({
-      title: t("sessionsView.newGroupTitle"),
-      label: t("sessionsView.newGroupPrompt"),
-      submitLabel: t("sessionsView.newGroupCreate"),
-      requireValue: true,
-      submit: (name) => writeNewCategory(name, session),
-    }));
-  }
-
-  /**
-   * One captured scope covers both writes: the catalog entry lands before the
-   * row moves, and a catalog write that outlived its connection must not be
-   * followed by an assignment issued on the replacement one.
-   */
-  async function writeNewCategory(
-    name: string,
-    session?: GatewaySessionRow,
-  ): Promise<string | null> {
-    state.error = null;
-    const scope = captureRequestScope();
-    if (!scope) {
-      return t("sessionsView.newGroupFailed");
-    }
-    const remembered = await rememberCustomGroup(name, scope);
-    if (remembered !== "completed") {
-      return typeof remembered === "object"
-        ? formatUiError(remembered.error)
-        : t("sessionsView.newGroupStale");
-    }
-    if (!session) {
-      return null;
-    }
-    const assigned = await patchSession(
-      session.key,
-      {
-        category: name,
-        ...(!isSubagentSessionKey(session.key) && !isPinnableUiSessionRow(session)
-          ? { sidebarRoot: true }
-          : {}),
-      },
-      scope,
-      session.sessionId,
-    );
-    if (typeof assigned === "object") {
-      return formatUiError(assigned.error);
-    }
-    return assigned === "stale" ? t("sessionsView.newGroupStale") : null;
-  }
-
   async function renameSession(row: GatewaySessionRow) {
     await inputDialog.rename(row, captureRequestScope(), isRequestScopeCurrent, (scope, patch) =>
       patchSession(row.key, patch, scope, row.sessionId, { sessionScope: true }),
@@ -1138,7 +971,7 @@ export function createSessionsPage(
       menu,
       trigger: sessionMenuTrigger,
       disabled: state.loading,
-      groups: knownCategories(),
+      groups: groups.known(),
       work: state.sessionMenuWork,
       onClose: () => closeSessionMenu(),
       onAction: (
@@ -1232,7 +1065,7 @@ export function createSessionsPage(
               sessionScope: true,
             });
           case "move-to-group":
-            return assignCategory(row.key, action.category);
+            return groups.assign(row.key, action.category);
           case "new-group":
             void actions.requestNewCategory(row.key);
             break;
@@ -1302,7 +1135,7 @@ export function createSessionsPage(
       // Keep the stored Person preference while the owner roster is unavailable.
       groupBy:
         personGroupingAvailable || state.groupBy !== "person" ? state.groupBy : ("none" as const),
-      knownCategories: knownCategories(),
+      knownCategories: groups.known(),
       selectedKeys: new Set(selectedSessions.keys()),
       labelDisabledReason: (row: GatewaySessionRow) =>
         mutationDisabledReason({
@@ -1350,7 +1183,7 @@ export function createSessionsPage(
       },
       onTranscriptSearchChange: actions.updateTranscriptSearchQuery,
       onTranscriptSearch: (): void => void actions.runTranscriptSearch(),
-      onClearTranscriptSearch: () => resetTranscriptSearchState(""),
+      onClearTranscriptSearch: () => transcriptSearch.reset(""),
       onSortChange: (
         column: SessionsPageState["sortColumn"],
         direction: SessionsPageState["sortDir"],
@@ -1364,7 +1197,7 @@ export function createSessionsPage(
         state.page = 0;
         saveStoredGroupBy(mode);
       },
-      onAssignCategory: assignCategory,
+      onAssignCategory: groups.assign,
       onRequestNewCategory: (sessionKey?: string): void =>
         void actions.requestNewCategory(sessionKey),
       onLoadMore: () => {
@@ -1448,13 +1281,13 @@ export function createSessionsPage(
     deleteAllArchived,
     deleteSessionFromMenu,
     stopCloudWorker,
-    rememberCustomGroup,
-    requestNewCategory,
+    rememberCustomGroup: groups.remember,
+    requestNewCategory: groups.create,
     patchSession,
     forkSession,
     runPluginAction,
-    updateTranscriptSearchQuery,
-    runTranscriptSearch,
+    updateTranscriptSearchQuery: transcriptSearch.update,
+    runTranscriptSearch: transcriptSearch.run,
     openSessionMenu,
     archive: archiveActions.archive,
   };
@@ -1479,7 +1312,6 @@ export function createSessionsPage(
       stopScope();
       unsubscribeList?.();
       pluginActionLifetime.abort();
-      transcriptSearchAbort?.abort();
       clearSearchTimer();
       inputDialog.abort();
       sessionPullRequestsForGateway(application.gateway).unwatch(menuOwner);
