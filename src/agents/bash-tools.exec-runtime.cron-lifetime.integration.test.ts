@@ -22,7 +22,7 @@ import { runExecProcess } from "./bash-tools.exec-runtime.js";
 // boundary without sleeps, provider calls, mocked supervisors, or process-kill assertions.
 describe("physical cron background exec lifetime", () => {
   for (const terminal of ["timeout", "completion"] as const) {
-    it(`stops a quiet background child on occurrence ${terminal} after its original turn closes`, async ({
+    it(`keeps a background child bound to occurrence ${terminal} after its original turn closes`, async ({
       signal,
     }) => {
       await withOpenClawTestState({ label: `physical-cron-${terminal}` }, async (state) => {
@@ -110,14 +110,23 @@ describe("physical cron background exec lifetime", () => {
           } else {
             clearCronJobActive(jobId, marker);
           }
-          expect(owned.run.session.requestCancelled).toBe(true);
-          // Native settlement must precede releasing the side-effect gate.
-          await expect(withinTest(owned.run.promise, signal)).resolves.toMatchObject({
-            status: "failed",
-            exitReason: "manual-cancel",
-          });
-          await fs.writeFile(owned.gate, "release");
-          await expect(fs.stat(owned.effect)).rejects.toMatchObject({ code: "ENOENT" });
+          if (terminal === "timeout") {
+            expect(owned.run.session.requestCancelled).toBe(true);
+            // Native settlement must precede releasing the side-effect gate.
+            await expect(withinTest(owned.run.promise, signal)).resolves.toMatchObject({
+              status: "failed",
+              exitReason: "manual-cancel",
+            });
+            await fs.writeFile(owned.gate, "release");
+            await expect(fs.stat(owned.effect)).rejects.toMatchObject({ code: "ENOENT" });
+          } else {
+            expect(owned.run.session.requestCancelled).not.toBe(true);
+            await fs.writeFile(owned.gate, "release");
+            await expect(withinTest(owned.run.promise, signal)).resolves.toMatchObject({
+              status: "completed",
+            });
+            expect(await fs.readFile(owned.effect, "utf8")).toBe("SIDE_EFFECT");
+          }
           expect(owned.run.session.aggregated).toContain("READY");
           expect(interactive.run.session.requestCancelled).not.toBe(true);
           expect(interactive.run.session.exited).toBe(false);

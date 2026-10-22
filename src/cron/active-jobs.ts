@@ -56,13 +56,24 @@ export function captureCronJobContinuationLifetime(
     return marker.continuationLifetime;
   }
   const controller = new AbortController();
+  let retiredNormally = false;
   // The scheduler keeps its timeout outcome. Continuations receive an explicit stop
   // so their inherited request owners also cancel background commands and queued wakes.
   const stop = () => controller.abort(createAgentRunDirectAbortError());
   owner.signal.addEventListener("abort", stop, { once: true });
   onCronJobInactive(marker, () => {
-    owner.signal.removeEventListener("abort", stop);
-    stop();
+    retiredNormally =
+      !getCurrentCronActiveJobMarker(jobId) &&
+      !owner.signal.aborted &&
+      marker.cancellation?.kind !== "requested" &&
+      (!marker.jobRemoved || marker.selfRemovalAccepted === true) &&
+      isMarkerActiveInGeneration(marker, getCronActiveJobState().generation);
+    // Accepted events belong to the session controller after successful teardown.
+    // A revoked occurrence keeps cancelling them and its physical background work.
+    if (!retiredNormally) {
+      owner.signal.removeEventListener("abort", stop);
+      stop();
+    }
   });
   if (owner.signal.aborted) {
     stop();
@@ -71,8 +82,13 @@ export function captureCronJobContinuationLifetime(
     signal: controller.signal,
     assertCurrent: () => {
       controller.signal.throwIfAborted();
-      if (getCurrentCronActiveJobMarker(jobId) !== marker) {
-        throw new Error("Cron occurrence ended; inspect the retained process result");
+      if (
+        (!retiredNormally && getCurrentCronActiveJobMarker(jobId) !== marker) ||
+        !isMarkerActiveInGeneration(marker, getCronActiveJobState().generation) ||
+        marker.cancellation?.kind === "requested" ||
+        (marker.jobRemoved && !marker.selfRemovalAccepted)
+      ) {
+        throw new Error("Cron occurrence revoked; inspect the retained process result");
       }
     },
   };

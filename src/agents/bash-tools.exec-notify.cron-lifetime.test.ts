@@ -26,13 +26,13 @@ import {
   prepareExecExitNotification,
   recoverExecExitNotifications,
 } from "./bash-tools.exec-notify.js";
-import { isAgentRunDirectAbortReason } from "./run-termination.js";
+import { createAgentRunDirectAbortError, isAgentRunDirectAbortReason } from "./run-termination.js";
 import { withGatewayToolCallerIdentity } from "./tools/gateway-caller-context.js";
 
 // The queue is external I/O here. This proves the real producer's captured cancellation
 // contract; queue enforcement and Gateway/model execution have separate integration proof.
 describe("cron background completion lifetime", () => {
-  it.each(["timeout", "completion"] as const)(
+  it.each(["timeout", "operator cancellation"] as const)(
     "keeps accepted and late exec notifications bound to cron %s",
     async (terminal) => {
       await withOpenClawTestState({ label: `exec-cron-${terminal}` }, async (state) => {
@@ -109,14 +109,14 @@ describe("cron background completion lifetime", () => {
           const options = enqueue.mock.calls[0]![1];
           releaseAgentRunContext(runId, claim);
           admission.close();
-          // Queue acceptance outlives the model invocation, but never the cron occurrence.
+          // Queue acceptance outlives the model invocation, but never a revoked cron occurrence.
           expect(() => options.expectedTarget?.assertCurrent?.()).not.toThrow();
           if (terminal === "timeout") {
             const error = new Error("cron: job execution timed out");
             error.name = "TimeoutError";
             controller.abort(error);
           } else {
-            clearCronJobActive(jobId, marker);
+            controller.abort(createAgentRunDirectAbortError());
           }
           expect(() => options.expectedTarget?.assertCurrent?.()).toThrow();
           expect(options.abortSignal?.aborted).toBe(true);
