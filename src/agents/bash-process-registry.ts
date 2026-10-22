@@ -72,6 +72,7 @@ export interface ProcessSession {
   notifyFromConversationTurn?: boolean;
   notifySessionTarget?: SessionEventTarget;
   assertExitNotificationAcceptanceCurrent?: () => void;
+  exitNotificationAbortSignal?: AbortSignal;
   persistExitNotification?: () => Promise<void>;
   exitNotificationPersistence?: Promise<void>;
   clearExitNotification?: () => Promise<void>;

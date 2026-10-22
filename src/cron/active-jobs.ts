@@ -4,6 +4,7 @@ import {
   type AdmittedRunContext,
   type OperationalRunInstanceRef,
 } from "../agents/admitted-run-context.js";
+import { createAgentRunDirectAbortError } from "../agents/run-termination.js";
 import {
   composeSessionSourceAssertion,
   prepareSessionSourceAuthority,
@@ -13,6 +14,8 @@ import { notifyGatewayWorkMetricsChanged } from "../infra/gateway-work-metrics-e
 import type { ReplyOperationObservation } from "../sessions/reply-operation-state.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import type { CronStandingGrantAuthority } from "./standing-grant-authority.types.js";
+
+type CronContinuationLifetime = { signal: AbortSignal; assertCurrent: () => void };
 
 type CronActiveJobState = {
   activeJobs: Map<string, CronActiveJobMarker>;
@@ -37,6 +40,44 @@ export function bindCronJobAdmittedRun(
   if (marker && assertActive && isCronActiveJobMarkerCurrent(marker)) {
     getCronActiveJobState().admittedJobRuns.set(marker, { context, assertActive, signal });
   }
+}
+
+/** Exec continuations retain their cron occurrence, never just its first model invocation. */
+export function captureCronJobContinuationLifetime(
+  jobId: string,
+  requestRunIds: readonly string[],
+): CronContinuationLifetime | undefined {
+  const marker = getCurrentCronActiveJobMarker(jobId);
+  const owner = marker && getCronActiveJobState().admittedJobRuns.get(marker);
+  if (!marker || !owner || !requestRunIds.includes(owner.context.operationalRunInstance.runId)) {
+    return undefined;
+  }
+  if (marker.continuationLifetime) {
+    return marker.continuationLifetime;
+  }
+  const controller = new AbortController();
+  // The scheduler keeps its timeout outcome. Continuations receive an explicit stop
+  // so their inherited request owners also cancel background commands and queued wakes.
+  const stop = () => controller.abort(createAgentRunDirectAbortError());
+  owner.signal.addEventListener("abort", stop, { once: true });
+  onCronJobInactive(marker, () => {
+    owner.signal.removeEventListener("abort", stop);
+    stop();
+  });
+  if (owner.signal.aborted) {
+    stop();
+  }
+  const lifetime: CronContinuationLifetime = {
+    signal: controller.signal,
+    assertCurrent: () => {
+      controller.signal.throwIfAborted();
+      if (getCurrentCronActiveJobMarker(jobId) !== marker) {
+        throw new Error("Cron occurrence ended; inspect the retained process result");
+      }
+    },
+  };
+  marker.continuationLifetime = lifetime;
+  return lifetime;
 }
 
 /** Captures one occurrence before admission without granting another prompt its authority. */
@@ -210,6 +251,7 @@ export function bindCronSelfRemovalCommitGuard(
 
 export type CronActiveJobMarker = {
   jobId: string;
+  continuationLifetime?: CronContinuationLifetime;
   standingGrantAuthority?: CronStandingGrantAuthority;
   agentId?: string;
   sessionKey?: string;
